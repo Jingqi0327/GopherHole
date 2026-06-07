@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package signaling;
+
+// 声明生成 go 代码的 package 路径
+option go_package = "github.com/Jingqi0327/GopherHole/proto/pb";
+
+// 协调中心提供的控制面服务
+service SignalingService {
+  // 节点注册：上线时调用，获取分配的虚拟 IP
+  rpc Register(RegisterRequest) returns (RegisterResponse) {}
+
+  // 心跳与状态流：双向流，客户端定期上报自身状态，服务端下发在线节点列表
+  rpc Heartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse) {}
+
+  // 预留：信令路由，用于后期转发 P2P 的打洞信令（如 RequestPunch, PunchAck）
+  rpc SignalRoute(SignalMessage) returns (SignalMessage) {}
+}
+
+message RegisterRequest {
+  // 可以包含主机名、OS信息或认证Token
+  string hostname = 1;
+  // 期望的固定虚拟 IP（如 "10.8.0.5"），如果为空则由 Server 自动分配
+  string requested_ip = 2;
+}
+
+message RegisterResponse {
+  // Server 分配给 Client 的虚拟 IP (例如: "10.8.0.2")
+  string virtual_ip = 1;
+  // 客户端在公网侧的出口 IP（用于辅助 NAT 探测）
+  string public_ip = 2;
+}
+
+message HeartbeatRequest {
+  string virtual_ip = 1;
+  // 客户端当前的 UDP 监听端口（预留给打洞阶段）
+  int32 public_port = 2;
+}
+
+// 定义一个在线节点的信息
+message RemotePeer {
+  string virtual_ip = 1;
+  string public_ip = 2;
+  int32 public_port = 3;
+}
+
+message HeartbeatResponse {
+  // 下发当前所有在线节点的信息
+  repeated RemotePeer peers = 1;
+}
+
+// 通用的信令转发格式
+message SignalMessage {
+  string from_vip = 1;
+  string to_vip = 2;
+  string type = 3; // 信令类型：RequestPunch, PunchAck 等
+  bytes payload = 4; // 具体数据
+}
