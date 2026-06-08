@@ -91,25 +91,31 @@ func (a *App) Run() error {
 		}
 	}()
 
-	// 开启交互式终端输入
-	go a.handleTerminalInput()
+	// 开启协程，接收服务端的推送
+	go func() {
+		for {
+			resp, err := stream.Recv()
+			if err != nil {
+				log.Printf("\n⚠️ Stream disconnected from server: %v", err)
+				log.Printf("👉 Existing P2P connections remain active, but no new peers can be discovered.")
+				return
+			}
 
-	// 第三步：主线程阻塞接收服务端的推送
-	for {
-		resp, err := stream.Recv()
-		if err != nil {
-			return fmt.Errorf("stream disconnected: %w", err)
+			switch payload := resp.Payload.(type) {
+			case *pb.HeartbeatResponse_PeerList:
+				a.peerTable.SyncPeers(payload.PeerList.Peers)
+				a.printPeers(payload.PeerList.Peers)
+			case *pb.HeartbeatResponse_Signal:
+				log.Printf("📥 Received signal from %s (Type: %v)", payload.Signal.FromVirtualIp, payload.Signal.Type)
+				a.udpEngine.HandleSignal(payload.Signal)
+			}
 		}
+	}()
 
-		switch payload := resp.Payload.(type) {
-		case *pb.HeartbeatResponse_PeerList:
-			a.peerTable.SyncPeers(payload.PeerList.Peers)
-			a.printPeers(payload.PeerList.Peers)
-		case *pb.HeartbeatResponse_Signal:
-			log.Printf("📥 Received signal from %s (Type: %v)", payload.Signal.FromVirtualIp, payload.Signal.Type)
-			a.udpEngine.HandleSignal(payload.Signal)
-		}
-	}
+	// 阻塞当前主线程，处理交互式终端输入
+	a.handleTerminalInput()
+
+	return nil
 }
 
 func (a *App) handleTerminalInput() {
