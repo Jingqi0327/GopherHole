@@ -1,10 +1,12 @@
 package client
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Jingqi0327/GopherHole/proto/pb"
@@ -16,19 +18,22 @@ type App struct {
 	serverAddr  string
 	requestedIP string
 	virtualIP   string
+	peerTable   *PeerTable
+	udpEngine   *UDPEngine
 }
 
 func NewApp(serverAddr, requestedIP string) *App {
 	return &App{
 		serverAddr:  serverAddr,
 		requestedIP: requestedIP,
+		peerTable:   NewPeerTable(),
 	}
 }
 
 // Run 启动客户端的核心生命周期
 func (a *App) Run() error {
 	log.Printf("Connecting to Signaling Server at %s...", a.serverAddr)
-	
+
 	// 连接 Server
 	conn, err := grpc.NewClient(a.serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -58,6 +63,13 @@ func (a *App) Run() error {
 	log.Printf("🌐 Assigned Virtual IP: %s", a.virtualIP)
 	log.Printf("🌍 Server sees our Public IP as: %s", regResp.PublicIp)
 
+	// 启动 UDP 引擎
+	a.udpEngine, err = NewUDPEngine(a.virtualIP, a.peerTable, grpcClient)
+	if err != nil {
+		return fmt.Errorf("failed to start UDP engine: %w", err)
+	}
+	a.udpEngine.Start()
+
 	// 第二步：开启心跳双向流
 	stream, err := grpcClient.Heartbeat(context.Background())
 	if err != nil {
@@ -66,11 +78,10 @@ func (a *App) Run() error {
 
 	// 开启协程，定时发送心跳
 	go func() {
-		// 先发一个立刻报到
 		for {
 			err := stream.Send(&pb.HeartbeatRequest{
 				VirtualIp:  a.virtualIP,
-				PublicPort: 0, // MVP-1 阶段还不涉及 P2P 实际通信，端口填 0
+				PublicPort: int32(a.udpEngine.GetLocalPort()),
 			})
 			if err != nil {
 				log.Printf("Failed to send heartbeat: %v", err)
@@ -80,19 +91,65 @@ func (a *App) Run() error {
 		}
 	}()
 
+	// 开启交互式终端输入
+	go a.handleTerminalInput()
+
 	// 第三步：主线程阻塞接收服务端的推送
 	for {
 		resp, err := stream.Recv()
 		if err != nil {
 			return fmt.Errorf("stream disconnected: %w", err)
 		}
-		
+
 		switch payload := resp.Payload.(type) {
 		case *pb.HeartbeatResponse_PeerList:
+			a.peerTable.SyncPeers(payload.PeerList.Peers)
 			a.printPeers(payload.PeerList.Peers)
 		case *pb.HeartbeatResponse_Signal:
 			log.Printf("📥 Received signal from %s (Type: %v)", payload.Signal.FromVirtualIp, payload.Signal.Type)
+			a.udpEngine.HandleSignal(payload.Signal)
 		}
+	}
+}
+
+func (a *App) handleTerminalInput() {
+	scanner := bufio.NewScanner(os.Stdin)
+	for {
+		// fmt.Print("> ") // 省略 prompt 以免干扰日志
+		if !scanner.Scan() {
+			break
+		}
+		text := strings.TrimSpace(scanner.Text())
+		if text == "" {
+			continue
+		}
+
+		parts := strings.SplitN(text, " ", 3)
+		cmd := strings.ToLower(parts[0])
+
+		switch cmd {
+		case "punch":
+			if len(parts) < 2 {
+				fmt.Println("Usage: punch <virtual_ip>")
+				continue
+			}
+			a.udpEngine.Punch(parts[1])
+		case "msg":
+			if len(parts) < 3 {
+				fmt.Println("Usage: msg <virtual_ip> <text>")
+				continue
+			}
+			a.udpEngine.SendMessage(parts[1], parts[2])
+		case "list":
+			// 可以增加一个打印本地 PeerTable 的命令
+			fmt.Println("Run 'list' to be implemented")
+		default:
+			fmt.Println("Unknown command. Supported: punch, msg")
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Printf("Terminal input error: %v", err)
 	}
 }
 
@@ -103,9 +160,20 @@ func (a *App) printPeers(peers []*pb.RemotePeer) {
 		marker := ""
 		if p.VirtualIp == a.virtualIP {
 			marker = "👈 (本节点/This Node)"
+		} else {
+			state := "Disconnected"
+			if peer := a.peerTable.GetPeer(p.VirtualIp); peer != nil {
+				switch peer.State {
+				case StatePunching:
+					state = "Punching..."
+				case StateConnected:
+					state = "Connected!"
+				}
+			}
+			marker = fmt.Sprintf("[%s]", state)
 		}
 		publicAddr := fmt.Sprintf("%s:%d", p.PublicIp, p.PublicPort)
-		fmt.Printf(" - Virtual IP: %-20s | Public: %-20s %s\n", p.VirtualIp, publicAddr, marker)
+		fmt.Printf(" - Virtual IP: %-15s | Public: %-20s %s\n", p.VirtualIp, publicAddr, marker)
 	}
 	fmt.Println("===================================================")
 }
