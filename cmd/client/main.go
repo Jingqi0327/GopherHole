@@ -1,20 +1,21 @@
 package main
 
 import (
-	"flag"
 	"log"
 
 	"github.com/Jingqi0327/GopherHole/internal/client"
+	"github.com/Jingqi0327/GopherHole/internal/config"
 )
 
 func main() {
-	serverAddr := flag.String("server", "127.0.0.1:8086", "Signaling Server address")
-	requestedIP := flag.String("ip", "", "Requested static Virtual IP (e.g. 10.8.0.5)")
-	flag.Parse()
+	cfg, err := config.LoadClientConfig()
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
 
 	log.Println("GopherHole Client is starting...")
 
-	app := client.NewApp(*serverAddr, *requestedIP)
+	app := client.NewApp(cfg.Server, cfg.IP)
 	if err := app.Run(); err != nil {
 		log.Fatalf("Client error: %v", err)
 	}

@@ -21,6 +21,55 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type SignalMessage_Type int32
+
+const (
+	SignalMessage_UNKNOWN       SignalMessage_Type = 0
+	SignalMessage_REQUEST_PUNCH SignalMessage_Type = 1 // 发起打洞请求
+	SignalMessage_PUNCH_ACK     SignalMessage_Type = 2 // 目标端响应（可选）
+)
+
+// Enum value maps for SignalMessage_Type.
+var (
+	SignalMessage_Type_name = map[int32]string{
+		0: "UNKNOWN",
+		1: "REQUEST_PUNCH",
+		2: "PUNCH_ACK",
+	}
+	SignalMessage_Type_value = map[string]int32{
+		"UNKNOWN":       0,
+		"REQUEST_PUNCH": 1,
+		"PUNCH_ACK":     2,
+	}
+)
+
+func (x SignalMessage_Type) Enum() *SignalMessage_Type {
+	p := new(SignalMessage_Type)
+	*p = x
+	return p
+}
+
+func (x SignalMessage_Type) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SignalMessage_Type) Descriptor() protoreflect.EnumDescriptor {
+	return file_signaling_proto_enumTypes[0].Descriptor()
+}
+
+func (SignalMessage_Type) Type() protoreflect.EnumType {
+	return &file_signaling_proto_enumTypes[0]
+}
+
+func (x SignalMessage_Type) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SignalMessage_Type.Descriptor instead.
+func (SignalMessage_Type) EnumDescriptor() ([]byte, []int) {
+	return file_signaling_proto_rawDescGZIP(), []int{6, 0}
+}
+
 type RegisterRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 可以包含主机名、OS信息或认证Token
@@ -243,17 +292,65 @@ func (x *RemotePeer) GetPublicPort() int32 {
 	return 0
 }
 
+type PeerList struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Peers         []*RemotePeer          `protobuf:"bytes,1,rep,name=peers,proto3" json:"peers,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PeerList) Reset() {
+	*x = PeerList{}
+	mi := &file_signaling_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PeerList) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PeerList) ProtoMessage() {}
+
+func (x *PeerList) ProtoReflect() protoreflect.Message {
+	mi := &file_signaling_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PeerList.ProtoReflect.Descriptor instead.
+func (*PeerList) Descriptor() ([]byte, []int) {
+	return file_signaling_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *PeerList) GetPeers() []*RemotePeer {
+	if x != nil {
+		return x.Peers
+	}
+	return nil
+}
+
+// 采用 oneof 结构，使双向流既能下发节点列表，也能下发 P2P 信令
 type HeartbeatResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// 下发当前所有在线节点的信息
-	Peers         []*RemotePeer `protobuf:"bytes,1,rep,name=peers,proto3" json:"peers,omitempty"`
+	// Types that are valid to be assigned to Payload:
+	//
+	//	*HeartbeatResponse_PeerList
+	//	*HeartbeatResponse_Signal
+	Payload       isHeartbeatResponse_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HeartbeatResponse) Reset() {
 	*x = HeartbeatResponse{}
-	mi := &file_signaling_proto_msgTypes[4]
+	mi := &file_signaling_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -265,7 +362,7 @@ func (x *HeartbeatResponse) String() string {
 func (*HeartbeatResponse) ProtoMessage() {}
 
 func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_signaling_proto_msgTypes[4]
+	mi := &file_signaling_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -278,30 +375,65 @@ func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*HeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_signaling_proto_rawDescGZIP(), []int{4}
+	return file_signaling_proto_rawDescGZIP(), []int{5}
 }
 
-func (x *HeartbeatResponse) GetPeers() []*RemotePeer {
+func (x *HeartbeatResponse) GetPayload() isHeartbeatResponse_Payload {
 	if x != nil {
-		return x.Peers
+		return x.Payload
 	}
 	return nil
 }
 
+func (x *HeartbeatResponse) GetPeerList() *PeerList {
+	if x != nil {
+		if x, ok := x.Payload.(*HeartbeatResponse_PeerList); ok {
+			return x.PeerList
+		}
+	}
+	return nil
+}
+
+func (x *HeartbeatResponse) GetSignal() *SignalMessage {
+	if x != nil {
+		if x, ok := x.Payload.(*HeartbeatResponse_Signal); ok {
+			return x.Signal
+		}
+	}
+	return nil
+}
+
+type isHeartbeatResponse_Payload interface {
+	isHeartbeatResponse_Payload()
+}
+
+type HeartbeatResponse_PeerList struct {
+	PeerList *PeerList `protobuf:"bytes,1,opt,name=peer_list,json=peerList,proto3,oneof"`
+}
+
+type HeartbeatResponse_Signal struct {
+	Signal *SignalMessage `protobuf:"bytes,2,opt,name=signal,proto3,oneof"`
+}
+
+func (*HeartbeatResponse_PeerList) isHeartbeatResponse_Payload() {}
+
+func (*HeartbeatResponse_Signal) isHeartbeatResponse_Payload() {}
+
 // 通用的信令转发格式
 type SignalMessage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	FromVip       string                 `protobuf:"bytes,1,opt,name=from_vip,json=fromVip,proto3" json:"from_vip,omitempty"`
-	ToVip         string                 `protobuf:"bytes,2,opt,name=to_vip,json=toVip,proto3" json:"to_vip,omitempty"`
-	Type          string                 `protobuf:"bytes,3,opt,name=type,proto3" json:"type,omitempty"`       // 信令类型：RequestPunch, PunchAck 等
-	Payload       []byte                 `protobuf:"bytes,4,opt,name=payload,proto3" json:"payload,omitempty"` // 具体数据
+	FromVirtualIp string                 `protobuf:"bytes,1,opt,name=from_virtual_ip,json=fromVirtualIp,proto3" json:"from_virtual_ip,omitempty"`
+	ToVirtualIp   string                 `protobuf:"bytes,2,opt,name=to_virtual_ip,json=toVirtualIp,proto3" json:"to_virtual_ip,omitempty"`
+	Type          SignalMessage_Type     `protobuf:"varint,3,opt,name=type,proto3,enum=signaling.SignalMessage_Type" json:"type,omitempty"`
+	// 可选的数据载荷，例如发送自己绑定的本地端口等
+	Payload       []byte `protobuf:"bytes,4,opt,name=payload,proto3" json:"payload,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SignalMessage) Reset() {
 	*x = SignalMessage{}
-	mi := &file_signaling_proto_msgTypes[5]
+	mi := &file_signaling_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -313,7 +445,7 @@ func (x *SignalMessage) String() string {
 func (*SignalMessage) ProtoMessage() {}
 
 func (x *SignalMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_signaling_proto_msgTypes[5]
+	mi := &file_signaling_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -326,28 +458,28 @@ func (x *SignalMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignalMessage.ProtoReflect.Descriptor instead.
 func (*SignalMessage) Descriptor() ([]byte, []int) {
-	return file_signaling_proto_rawDescGZIP(), []int{5}
+	return file_signaling_proto_rawDescGZIP(), []int{6}
 }
 
-func (x *SignalMessage) GetFromVip() string {
+func (x *SignalMessage) GetFromVirtualIp() string {
 	if x != nil {
-		return x.FromVip
+		return x.FromVirtualIp
 	}
 	return ""
 }
 
-func (x *SignalMessage) GetToVip() string {
+func (x *SignalMessage) GetToVirtualIp() string {
 	if x != nil {
-		return x.ToVip
+		return x.ToVirtualIp
 	}
 	return ""
 }
 
-func (x *SignalMessage) GetType() string {
+func (x *SignalMessage) GetType() SignalMessage_Type {
 	if x != nil {
 		return x.Type
 	}
-	return ""
+	return SignalMessage_UNKNOWN
 }
 
 func (x *SignalMessage) GetPayload() []byte {
@@ -355,6 +487,58 @@ func (x *SignalMessage) GetPayload() []byte {
 		return x.Payload
 	}
 	return nil
+}
+
+type SignalMessageAck struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	ErrMsg        string                 `protobuf:"bytes,2,opt,name=err_msg,json=errMsg,proto3" json:"err_msg,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SignalMessageAck) Reset() {
+	*x = SignalMessageAck{}
+	mi := &file_signaling_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SignalMessageAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SignalMessageAck) ProtoMessage() {}
+
+func (x *SignalMessageAck) ProtoReflect() protoreflect.Message {
+	mi := &file_signaling_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SignalMessageAck.ProtoReflect.Descriptor instead.
+func (*SignalMessageAck) Descriptor() ([]byte, []int) {
+	return file_signaling_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *SignalMessageAck) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *SignalMessageAck) GetErrMsg() string {
+	if x != nil {
+		return x.ErrMsg
+	}
+	return ""
 }
 
 var File_signaling_proto protoreflect.FileDescriptor
@@ -380,18 +564,29 @@ const file_signaling_proto_rawDesc = "" +
 	"virtual_ip\x18\x01 \x01(\tR\tvirtualIp\x12\x1b\n" +
 	"\tpublic_ip\x18\x02 \x01(\tR\bpublicIp\x12\x1f\n" +
 	"\vpublic_port\x18\x03 \x01(\x05R\n" +
-	"publicPort\"@\n" +
-	"\x11HeartbeatResponse\x12+\n" +
-	"\x05peers\x18\x01 \x03(\v2\x15.signaling.RemotePeerR\x05peers\"o\n" +
-	"\rSignalMessage\x12\x19\n" +
-	"\bfrom_vip\x18\x01 \x01(\tR\afromVip\x12\x15\n" +
-	"\x06to_vip\x18\x02 \x01(\tR\x05toVip\x12\x12\n" +
-	"\x04type\x18\x03 \x01(\tR\x04type\x12\x18\n" +
-	"\apayload\x18\x04 \x01(\fR\apayload2\xec\x01\n" +
+	"publicPort\"7\n" +
+	"\bPeerList\x12+\n" +
+	"\x05peers\x18\x01 \x03(\v2\x15.signaling.RemotePeerR\x05peers\"\x86\x01\n" +
+	"\x11HeartbeatResponse\x122\n" +
+	"\tpeer_list\x18\x01 \x01(\v2\x13.signaling.PeerListH\x00R\bpeerList\x122\n" +
+	"\x06signal\x18\x02 \x01(\v2\x18.signaling.SignalMessageH\x00R\x06signalB\t\n" +
+	"\apayload\"\xdf\x01\n" +
+	"\rSignalMessage\x12&\n" +
+	"\x0ffrom_virtual_ip\x18\x01 \x01(\tR\rfromVirtualIp\x12\"\n" +
+	"\rto_virtual_ip\x18\x02 \x01(\tR\vtoVirtualIp\x121\n" +
+	"\x04type\x18\x03 \x01(\x0e2\x1d.signaling.SignalMessage.TypeR\x04type\x12\x18\n" +
+	"\apayload\x18\x04 \x01(\fR\apayload\"5\n" +
+	"\x04Type\x12\v\n" +
+	"\aUNKNOWN\x10\x00\x12\x11\n" +
+	"\rREQUEST_PUNCH\x10\x01\x12\r\n" +
+	"\tPUNCH_ACK\x10\x02\"E\n" +
+	"\x10SignalMessageAck\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x17\n" +
+	"\aerr_msg\x18\x02 \x01(\tR\x06errMsg2\xef\x01\n" +
 	"\x10SignalingService\x12E\n" +
 	"\bRegister\x12\x1a.signaling.RegisterRequest\x1a\x1b.signaling.RegisterResponse\"\x00\x12L\n" +
-	"\tHeartbeat\x12\x1b.signaling.HeartbeatRequest\x1a\x1c.signaling.HeartbeatResponse\"\x00(\x010\x01\x12C\n" +
-	"\vSignalRoute\x12\x18.signaling.SignalMessage\x1a\x18.signaling.SignalMessage\"\x00B+Z)github.com/Jingqi0327/GopherHole/proto/pbb\x06proto3"
+	"\tHeartbeat\x12\x1b.signaling.HeartbeatRequest\x1a\x1c.signaling.HeartbeatResponse\"\x00(\x010\x01\x12F\n" +
+	"\vSignalRoute\x12\x18.signaling.SignalMessage\x1a\x1b.signaling.SignalMessageAck\"\x00B+Z)github.com/Jingqi0327/GopherHole/proto/pbb\x06proto3"
 
 var (
 	file_signaling_proto_rawDescOnce sync.Once
@@ -405,28 +600,35 @@ func file_signaling_proto_rawDescGZIP() []byte {
 	return file_signaling_proto_rawDescData
 }
 
-var file_signaling_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_signaling_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_signaling_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_signaling_proto_goTypes = []any{
-	(*RegisterRequest)(nil),   // 0: signaling.RegisterRequest
-	(*RegisterResponse)(nil),  // 1: signaling.RegisterResponse
-	(*HeartbeatRequest)(nil),  // 2: signaling.HeartbeatRequest
-	(*RemotePeer)(nil),        // 3: signaling.RemotePeer
-	(*HeartbeatResponse)(nil), // 4: signaling.HeartbeatResponse
-	(*SignalMessage)(nil),     // 5: signaling.SignalMessage
+	(SignalMessage_Type)(0),   // 0: signaling.SignalMessage.Type
+	(*RegisterRequest)(nil),   // 1: signaling.RegisterRequest
+	(*RegisterResponse)(nil),  // 2: signaling.RegisterResponse
+	(*HeartbeatRequest)(nil),  // 3: signaling.HeartbeatRequest
+	(*RemotePeer)(nil),        // 4: signaling.RemotePeer
+	(*PeerList)(nil),          // 5: signaling.PeerList
+	(*HeartbeatResponse)(nil), // 6: signaling.HeartbeatResponse
+	(*SignalMessage)(nil),     // 7: signaling.SignalMessage
+	(*SignalMessageAck)(nil),  // 8: signaling.SignalMessageAck
 }
 var file_signaling_proto_depIdxs = []int32{
-	3, // 0: signaling.HeartbeatResponse.peers:type_name -> signaling.RemotePeer
-	0, // 1: signaling.SignalingService.Register:input_type -> signaling.RegisterRequest
-	2, // 2: signaling.SignalingService.Heartbeat:input_type -> signaling.HeartbeatRequest
-	5, // 3: signaling.SignalingService.SignalRoute:input_type -> signaling.SignalMessage
-	1, // 4: signaling.SignalingService.Register:output_type -> signaling.RegisterResponse
-	4, // 5: signaling.SignalingService.Heartbeat:output_type -> signaling.HeartbeatResponse
-	5, // 6: signaling.SignalingService.SignalRoute:output_type -> signaling.SignalMessage
-	4, // [4:7] is the sub-list for method output_type
-	1, // [1:4] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	4, // 0: signaling.PeerList.peers:type_name -> signaling.RemotePeer
+	5, // 1: signaling.HeartbeatResponse.peer_list:type_name -> signaling.PeerList
+	7, // 2: signaling.HeartbeatResponse.signal:type_name -> signaling.SignalMessage
+	0, // 3: signaling.SignalMessage.type:type_name -> signaling.SignalMessage.Type
+	1, // 4: signaling.SignalingService.Register:input_type -> signaling.RegisterRequest
+	3, // 5: signaling.SignalingService.Heartbeat:input_type -> signaling.HeartbeatRequest
+	7, // 6: signaling.SignalingService.SignalRoute:input_type -> signaling.SignalMessage
+	2, // 7: signaling.SignalingService.Register:output_type -> signaling.RegisterResponse
+	6, // 8: signaling.SignalingService.Heartbeat:output_type -> signaling.HeartbeatResponse
+	8, // 9: signaling.SignalingService.SignalRoute:output_type -> signaling.SignalMessageAck
+	7, // [7:10] is the sub-list for method output_type
+	4, // [4:7] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_signaling_proto_init() }
@@ -434,18 +636,23 @@ func file_signaling_proto_init() {
 	if File_signaling_proto != nil {
 		return
 	}
+	file_signaling_proto_msgTypes[5].OneofWrappers = []any{
+		(*HeartbeatResponse_PeerList)(nil),
+		(*HeartbeatResponse_Signal)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_signaling_proto_rawDesc), len(file_signaling_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   6,
+			NumEnums:      1,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_signaling_proto_goTypes,
 		DependencyIndexes: file_signaling_proto_depIdxs,
+		EnumInfos:         file_signaling_proto_enumTypes,
 		MessageInfos:      file_signaling_proto_msgTypes,
 	}.Build()
 	File_signaling_proto = out.File
