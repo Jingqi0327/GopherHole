@@ -5,6 +5,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/Jingqi0327/GopherHole/internal/config"
 	"github.com/Jingqi0327/GopherHole/internal/server"
 	"github.com/Jingqi0327/GopherHole/proto/pb"
 	"google.golang.org/grpc"
@@ -12,9 +13,14 @@ import (
 )
 
 func main() {
+	cfg, err := config.LoadServerConfig()
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
 	log.Println("GopherHole Signaling Server is starting...")
 
-	ipam := server.NewIPAM("10.8.0")
+	ipam := server.NewIPAM(cfg.VirtualSubnet)
 	manager := server.NewPeerManager(func(virtualIP string) {
 		ipam.Release(virtualIP)
 	})
@@ -30,9 +36,9 @@ func main() {
 	svc := server.NewSignalingService(ipam, manager)
 
 	// 监听 TCP 端口
-	lis, err := net.Listen("tcp", ":8086")
+	lis, err := net.Listen("tcp", cfg.BindAddr)
 	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+		log.Fatalf("failed to listen on %s: %v", cfg.BindAddr, err)
 	}
 
 	grpcServer := grpc.NewServer()
@@ -40,7 +46,7 @@ func main() {
 
 	reflection.Register(grpcServer)
 
-	log.Println("Signaling Server listening on :8086")
+	log.Printf("Signaling Server listening on %s (Subnet: %s.x)\n", cfg.BindAddr, cfg.VirtualSubnet)
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)
 	}

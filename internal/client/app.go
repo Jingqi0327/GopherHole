@@ -99,7 +99,7 @@ func (a *App) printPeers(peers []*pb.RemotePeer) {
 			marker = "👈 (本节点/This Node)"
 		}
 		publicAddr := fmt.Sprintf("%s:%d", p.PublicIp, p.PublicPort)
-		fmt.Printf(" - VIP: %-15s | Public: %-20s %s\n", p.VirtualIp, publicAddr, marker)
+		fmt.Printf(" - Virtual IP: %-20s | Public: %-20s %s\n", p.VirtualIp, publicAddr, marker)
 	}
 	fmt.Println("===================================================")
 }
