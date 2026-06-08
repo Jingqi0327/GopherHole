@@ -32,10 +32,10 @@ const (
 type SignalingServiceClient interface {
 	// 节点注册：上线时调用，获取分配的虚拟 IP
 	Register(ctx context.Context, in *RegisterRequest, opts ...grpc.CallOption) (*RegisterResponse, error)
-	// 心跳与状态流：双向流，客户端定期上报自身状态，服务端下发在线节点列表
+	// 心跳与状态流：双向流，客户端定期上报自身状态，服务端下发在线节点列表及转发的信令
 	Heartbeat(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[HeartbeatRequest, HeartbeatResponse], error)
-	// 预留：信令路由，用于后期转发 P2P 的打洞信令（如 RequestPunch, PunchAck）
-	SignalRoute(ctx context.Context, in *SignalMessage, opts ...grpc.CallOption) (*SignalMessage, error)
+	// 信令路由：客户端通过此接口向服务端发送打洞请求，服务端会通过目标客户端的 Heartbeat 流下发
+	SignalRoute(ctx context.Context, in *SignalMessage, opts ...grpc.CallOption) (*SignalMessageAck, error)
 }
 
 type signalingServiceClient struct {
@@ -69,9 +69,9 @@ func (c *signalingServiceClient) Heartbeat(ctx context.Context, opts ...grpc.Cal
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type SignalingService_HeartbeatClient = grpc.BidiStreamingClient[HeartbeatRequest, HeartbeatResponse]
 
-func (c *signalingServiceClient) SignalRoute(ctx context.Context, in *SignalMessage, opts ...grpc.CallOption) (*SignalMessage, error) {
+func (c *signalingServiceClient) SignalRoute(ctx context.Context, in *SignalMessage, opts ...grpc.CallOption) (*SignalMessageAck, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SignalMessage)
+	out := new(SignalMessageAck)
 	err := c.cc.Invoke(ctx, SignalingService_SignalRoute_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -87,10 +87,10 @@ func (c *signalingServiceClient) SignalRoute(ctx context.Context, in *SignalMess
 type SignalingServiceServer interface {
 	// 节点注册：上线时调用，获取分配的虚拟 IP
 	Register(context.Context, *RegisterRequest) (*RegisterResponse, error)
-	// 心跳与状态流：双向流，客户端定期上报自身状态，服务端下发在线节点列表
+	// 心跳与状态流：双向流，客户端定期上报自身状态，服务端下发在线节点列表及转发的信令
 	Heartbeat(grpc.BidiStreamingServer[HeartbeatRequest, HeartbeatResponse]) error
-	// 预留：信令路由，用于后期转发 P2P 的打洞信令（如 RequestPunch, PunchAck）
-	SignalRoute(context.Context, *SignalMessage) (*SignalMessage, error)
+	// 信令路由：客户端通过此接口向服务端发送打洞请求，服务端会通过目标客户端的 Heartbeat 流下发
+	SignalRoute(context.Context, *SignalMessage) (*SignalMessageAck, error)
 	mustEmbedUnimplementedSignalingServiceServer()
 }
 
@@ -107,7 +107,7 @@ func (UnimplementedSignalingServiceServer) Register(context.Context, *RegisterRe
 func (UnimplementedSignalingServiceServer) Heartbeat(grpc.BidiStreamingServer[HeartbeatRequest, HeartbeatResponse]) error {
 	return status.Error(codes.Unimplemented, "method Heartbeat not implemented")
 }
-func (UnimplementedSignalingServiceServer) SignalRoute(context.Context, *SignalMessage) (*SignalMessage, error) {
+func (UnimplementedSignalingServiceServer) SignalRoute(context.Context, *SignalMessage) (*SignalMessageAck, error) {
 	return nil, status.Error(codes.Unimplemented, "method SignalRoute not implemented")
 }
 func (UnimplementedSignalingServiceServer) mustEmbedUnimplementedSignalingServiceServer() {}

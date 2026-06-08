@@ -10,11 +10,11 @@ service SignalingService {
   // 节点注册：上线时调用，获取分配的虚拟 IP
   rpc Register(RegisterRequest) returns (RegisterResponse) {}
 
-  // 心跳与状态流：双向流，客户端定期上报自身状态，服务端下发在线节点列表
+  // 心跳与状态流：双向流，客户端定期上报自身状态，服务端下发在线节点列表及转发的信令
   rpc Heartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse) {}
 
-  // 预留：信令路由，用于后期转发 P2P 的打洞信令（如 RequestPunch, PunchAck）
-  rpc SignalRoute(SignalMessage) returns (SignalMessage) {}
+  // 信令路由：客户端通过此接口向服务端发送打洞请求，服务端会通过目标客户端的 Heartbeat 流下发
+  rpc SignalRoute(SignalMessage) returns (SignalMessageAck) {}
 }
 
 message RegisterRequest {
@@ -44,15 +44,34 @@ message RemotePeer {
   int32 public_port = 3;
 }
 
-message HeartbeatResponse {
-  // 下发当前所有在线节点的信息
+message PeerList {
   repeated RemotePeer peers = 1;
+}
+
+// 采用 oneof 结构，使双向流既能下发节点列表，也能下发 P2P 信令
+message HeartbeatResponse {
+  oneof payload {
+    PeerList peer_list = 1;
+    SignalMessage signal = 2;
+  }
 }
 
 // 通用的信令转发格式
 message SignalMessage {
-  string from_vip = 1;
-  string to_vip = 2;
-  string type = 3; // 信令类型：RequestPunch, PunchAck 等
-  bytes payload = 4; // 具体数据
+  string from_virtual_ip = 1;
+  string to_virtual_ip = 2;
+
+  enum Type {
+    UNKNOWN = 0;
+    REQUEST_PUNCH = 1; // 发起打洞请求
+    PUNCH_ACK = 2;     // 目标端响应（可选）
+  }
+  Type type = 3; 
+  // 可选的数据载荷，例如发送自己绑定的本地端口等
+  bytes payload = 4;
+}
+
+message SignalMessageAck {
+  bool success = 1;
+  string err_msg = 2;
 }
