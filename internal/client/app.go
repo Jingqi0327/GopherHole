@@ -80,13 +80,19 @@ func (a *App) Run() error {
 		}
 	}()
 
-	// 第三步：主线程阻塞接收服务端的节点变动推送
+	// 第三步：主线程阻塞接收服务端的推送
 	for {
 		resp, err := stream.Recv()
 		if err != nil {
 			return fmt.Errorf("stream disconnected: %w", err)
 		}
-		a.printPeers(resp.Peers)
+		
+		switch payload := resp.Payload.(type) {
+		case *pb.HeartbeatResponse_PeerList:
+			a.printPeers(payload.PeerList.Peers)
+		case *pb.HeartbeatResponse_Signal:
+			log.Printf("📥 Received signal from %s (Type: %v)", payload.Signal.FromVirtualIp, payload.Signal.Type)
+		}
 	}
 }
 

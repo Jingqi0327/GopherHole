@@ -48,7 +48,7 @@ func (s *SignalingService) Register(ctx context.Context, req *pb.RegisterRequest
 	}, nil
 }
 
-// Heartbeat 处理节点心跳与状态同步
+// Heartbeat 处理节点心跳与状态同步，同时作为 P2P 信令下发通道
 func (s *SignalingService) Heartbeat(stream pb.SignalingService_HeartbeatServer) error {
 	// 等待第一次心跳包，建立连接
 	req, err := stream.Recv()
@@ -68,9 +68,13 @@ func (s *SignalingService) Heartbeat(stream pb.SignalingService_HeartbeatServer)
 	s.manager.AddOrUpdatePeer(req.VirtualIp, publicIP, req.PublicPort)
 	log.Printf("Node %s started heartbeat (Public Port: %d)", req.VirtualIp, req.PublicPort)
 
+	// 注册信令通道
+	signalCh := s.manager.RegisterSignalChannel(req.VirtualIp)
+
 	// 断开时移除节点
 	defer func() {
 		log.Printf("Node %s disconnected", req.VirtualIp)
+		s.manager.UnregisterSignalChannel(req.VirtualIp)
 		s.manager.RemovePeer(req.VirtualIp)
 	}()
 
@@ -79,7 +83,12 @@ func (s *SignalingService) Heartbeat(stream pb.SignalingService_HeartbeatServer)
 	defer s.manager.Unsubscribe(updateCh)
 
 	// 连接成功后，立即下发一次当前的完整节点列表
-	if err := stream.Send(&pb.HeartbeatResponse{Peers: s.manager.GetAllPeers()}); err != nil {
+	initResp := &pb.HeartbeatResponse{
+		Payload: &pb.HeartbeatResponse_PeerList{
+			PeerList: &pb.PeerList{Peers: s.manager.GetAllPeers()},
+		},
+	}
+	if err := stream.Send(initResp); err != nil {
 		return err
 	}
 
@@ -96,17 +105,53 @@ func (s *SignalingService) Heartbeat(stream pb.SignalingService_HeartbeatServer)
 		}
 	}()
 
-	// 主循环：等待错误或者节点列表更新事件
+	// 主循环：等待错误、节点列表更新事件或定向信令推送
 	for {
 		select {
 		case err := <-errCh:
 			return err
 		case <-updateCh:
 			// 节点列表有变动，下发给当前客户端
-			peers := s.manager.GetAllPeers()
-			if err := stream.Send(&pb.HeartbeatResponse{Peers: peers}); err != nil {
+			updateResp := &pb.HeartbeatResponse{
+				Payload: &pb.HeartbeatResponse_PeerList{
+					PeerList: &pb.PeerList{Peers: s.manager.GetAllPeers()},
+				},
+			}
+			if err := stream.Send(updateResp); err != nil {
+				return err
+			}
+		case sig, ok := <-signalCh:
+			if !ok {
+				// channel closed, exit
+				return nil
+			}
+			// 有针对该客户端的信令需要下发
+			sigResp := &pb.HeartbeatResponse{
+				Payload: &pb.HeartbeatResponse_Signal{
+					Signal: sig,
+				},
+			}
+			if err := stream.Send(sigResp); err != nil {
 				return err
 			}
 		}
 	}
+}
+
+// SignalRoute 处理客户端发送的信令路由请求
+func (s *SignalingService) SignalRoute(ctx context.Context, req *pb.SignalMessage) (*pb.SignalMessageAck, error) {
+	log.Printf("Routing signal [%v] from %s to %s", req.Type, req.FromVirtualIp, req.ToVirtualIp)
+	
+	success := s.manager.RouteSignal(req.ToVirtualIp, req)
+	if !success {
+		log.Printf("Failed to route signal to %s (Offline or channel full)", req.ToVirtualIp)
+		return &pb.SignalMessageAck{
+			Success: false,
+			ErrMsg:  "Target node offline or busy",
+		}, nil
+	}
+
+	return &pb.SignalMessageAck{
+		Success: true,
+	}, nil
 }
