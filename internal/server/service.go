@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net"
+	"time"
 
 	"github.com/Jingqi0327/GopherHole/proto/pb"
 	"google.golang.org/grpc/codes"
@@ -40,6 +41,16 @@ func (s *SignalingService) Register(ctx context.Context, req *pb.RegisterRequest
 	if err != nil {
 		return nil, status.Errorf(codes.AlreadyExists, "IP allocation failed: %v", err)
 	}
+
+	// 启动一个定时器，如果 30 秒内没有建立心跳（即未被加入到 PeerManager），则视为注册后客户端异常退出，主动释放 IP
+	go func(ip string) {
+		time.Sleep(30 * time.Second)
+		if !s.manager.HasPeer(ip) {
+			log.Printf("Recycling ghost IP %s (no heartbeat established within 30s)", ip)
+			s.ipam.Release(ip)
+		}
+	}(virtualIP)
+
 	log.Printf("Node registered: %s (Public IP: %s), Assigned VirtualIP: %s", req.Hostname, publicIP, virtualIP)
 
 	return &pb.RegisterResponse{

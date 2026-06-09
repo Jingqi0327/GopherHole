@@ -71,6 +71,14 @@ func (m *PeerManager) RemovePeer(virtualIP string) {
 	}
 }
 
+// HasPeer 检查是否存在对应节点
+func (m *PeerManager) HasPeer(virtualIP string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, exists := m.peers[virtualIP]
+	return exists
+}
+
 // GetAllPeers 获取所有在线节点
 func (m *PeerManager) GetAllPeers() []*pb.RemotePeer {
 	m.mu.RLock()
