@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Jingqi0327/GopherHole/proto/pb"
+	"github.com/Jingqi0327/GopherHole/pkg/tun"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -20,6 +21,7 @@ type App struct {
 	virtualIP   string
 	peerTable   *PeerTable
 	udpEngine   *UDPEngine
+	tunDevice   tun.Tunnel
 }
 
 func NewApp(serverAddr, requestedIP string) *App {
@@ -62,6 +64,27 @@ func (a *App) Run() error {
 	log.Printf("✅ Registration successful!")
 	log.Printf("🌐 Assigned Virtual IP: %s", a.virtualIP)
 	log.Printf("🌍 Server sees our Public IP as: %s", regResp.PublicIp)
+
+	// 初始化 TUN 虚拟网卡
+	tunDevice, err := tun.NewTunnel("gh0", a.virtualIP)
+	if err != nil {
+		return fmt.Errorf("failed to initialize TUN device: %w", err)
+	}
+	a.tunDevice = tunDevice
+	log.Printf("🚀 TUN interface [%s] initialized with IP %s", tunDevice.Name(), a.virtualIP)
+
+	// 开启后台协程读取 TUN 网卡数据，防止缓冲区占满
+	go func() {
+		buf := make([]byte, 2000) // MTU is 1420, 2000 is enough
+		for {
+			n, err := tunDevice.Read(buf)
+			if err != nil {
+				log.Printf("TUN Read error: %v", err)
+				return
+			}
+			log.Printf("📦 [TUN -> App] Read %d bytes from virtual interface", n)
+		}
+	}()
 
 	// 启动 UDP 引擎
 	a.udpEngine, err = NewUDPEngine(a.virtualIP, a.peerTable, grpcClient)

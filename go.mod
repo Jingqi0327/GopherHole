@@ -3,6 +3,7 @@ module github.com/Jingqi0327/GopherHole
 go 1.25.8
 
 require (
+	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
 	google.golang.org/grpc v1.81.1
