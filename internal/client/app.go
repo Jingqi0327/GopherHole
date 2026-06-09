@@ -46,6 +46,32 @@ func (a *App) Run() error {
 	grpcClient := pb.NewSignalingServiceClient(conn)
 
 	// 第一步：注册节点并获取 Virtual IP
+	if err := a.registerNode(grpcClient); err != nil {
+		return err
+	}
+
+	// 第二步：初始化 TUN 虚拟网卡
+	if err := a.initTunDevice(); err != nil {
+		return err
+	}
+
+	// 第三步：启动 UDP 引擎
+	if err := a.startUDPEngine(grpcClient); err != nil {
+		return err
+	}
+
+	// 第四步：开启心跳双向流，接收信令与节点状态
+	if err := a.startHeartbeatStream(grpcClient); err != nil {
+		return err
+	}
+
+	// 阻塞当前主线程，处理交互式终端输入
+	a.handleTerminalInput()
+
+	return nil
+}
+
+func (a *App) registerNode(grpcClient pb.SignalingServiceClient) error {
 	hostname, _ := os.Hostname()
 	regReq := &pb.RegisterRequest{
 		Hostname:    hostname,
@@ -64,8 +90,10 @@ func (a *App) Run() error {
 	log.Printf("✅ Registration successful!")
 	log.Printf("🌐 Assigned Virtual IP: %s", a.virtualIP)
 	log.Printf("🌍 Server sees our Public IP as: %s", regResp.PublicIp)
+	return nil
+}
 
-	// 初始化 TUN 虚拟网卡
+func (a *App) initTunDevice() error {
 	tunDevice, err := tun.NewTunnel("gh0", a.virtualIP)
 	if err != nil {
 		return fmt.Errorf("failed to initialize TUN device: %w", err)
@@ -73,27 +101,20 @@ func (a *App) Run() error {
 	a.tunDevice = tunDevice
 	log.Printf("🚀 TUN interface [%s] initialized with IP %s", tunDevice.Name(), a.virtualIP)
 
-	// 开启后台协程读取 TUN 网卡数据，防止缓冲区占满
-	go func() {
-		buf := make([]byte, 2000) // MTU is 1420, 2000 is enough
-		for {
-			n, err := tunDevice.Read(buf)
-			if err != nil {
-				log.Printf("TUN Read error: %v", err)
-				return
-			}
-			log.Printf("📦 [TUN -> App] Read %d bytes from virtual interface", n)
-		}
-	}()
+	return nil
+}
 
-	// 启动 UDP 引擎
-	a.udpEngine, err = NewUDPEngine(a.virtualIP, a.peerTable, grpcClient)
+func (a *App) startUDPEngine(grpcClient pb.SignalingServiceClient) error {
+	engine, err := NewUDPEngine(a.virtualIP, a.peerTable, grpcClient)
 	if err != nil {
 		return fmt.Errorf("failed to start UDP engine: %w", err)
 	}
+	a.udpEngine = engine
 	a.udpEngine.Start()
+	return nil
+}
 
-	// 第二步：开启心跳双向流
+func (a *App) startHeartbeatStream(grpcClient pb.SignalingServiceClient) error {
 	stream, err := grpcClient.Heartbeat(context.Background())
 	if err != nil {
 		return fmt.Errorf("failed to start heartbeat stream: %w", err)
@@ -134,9 +155,6 @@ func (a *App) Run() error {
 			}
 		}
 	}()
-
-	// 阻塞当前主线程，处理交互式终端输入
-	a.handleTerminalInput()
 
 	return nil
 }

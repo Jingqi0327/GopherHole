@@ -62,13 +62,14 @@ func (e *UDPEngine) readLoop() {
 
 func (e *UDPEngine) handlePacket(data []byte, addr *net.UDPAddr) {
 	msg := string(data)
-	parts := strings.SplitN(msg, ":", 3)
+	parts := strings.SplitN(msg, ":", 3) //msg格式 cmd:virtualIP:port
 	if len(parts) < 2 {
 		return
 	}
-	
+
 	cmd := parts[0]
 	fromVirtualIP := parts[1]
+	fromPort := parts[2]
 
 	// 无论收到什么包，更新该节点的实际公网端点（这对于穿越 Symmetric NAT 很关键，因为信令服务器看到的端口可能和双方互打的端口不同）
 	e.peerTable.UpdateAddr(fromVirtualIP, addr)
@@ -94,7 +95,7 @@ func (e *UDPEngine) handlePacket(data []byte, addr *net.UDPAddr) {
 		}
 	case "MSG":
 		if len(parts) == 3 {
-			fmt.Printf("\n💬 [Msg from %s]: %s\n", fromVirtualIP, parts[2])
+			fmt.Printf("\n💬 [Msg from %s]: %s\n", fromVirtualIP, fromPort)
 		}
 	}
 }
