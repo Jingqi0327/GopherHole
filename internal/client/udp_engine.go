@@ -10,15 +10,21 @@ import (
 	"github.com/Jingqi0327/GopherHole/proto/pb"
 )
 
+const (
+	PacketTypeData    byte = 0x01
+	PacketTypeControl byte = 0x02
+)
+
 type UDPEngine struct {
-	conn      *net.UDPConn
-	localPort int
-	peerTable *PeerTable
-	virtualIP string
-	grpcCli   pb.SignalingServiceClient
+	conn       *net.UDPConn
+	localPort  int
+	peerTable  *PeerTable
+	virtualIP  string
+	grpcCli    pb.SignalingServiceClient
+	onIPPacket func(data []byte)
 }
 
-func NewUDPEngine(virtualIP string, pt *PeerTable, grpcCli pb.SignalingServiceClient) (*UDPEngine, error) {
+func NewUDPEngine(virtualIP string, pt *PeerTable, grpcCli pb.SignalingServiceClient, onIP func([]byte)) (*UDPEngine, error) {
 	addr, err := net.ResolveUDPAddr("udp", ":0") // Bind to any available port
 	if err != nil {
 		return nil, err
@@ -32,11 +38,12 @@ func NewUDPEngine(virtualIP string, pt *PeerTable, grpcCli pb.SignalingServiceCl
 	log.Printf("🚀 UDP Engine started on local port %d", localAddr.Port)
 
 	return &UDPEngine{
-		conn:      conn,
-		localPort: localAddr.Port,
-		peerTable: pt,
-		virtualIP: virtualIP,
-		grpcCli:   grpcCli,
+		conn:       conn,
+		localPort:  localAddr.Port,
+		peerTable:  pt,
+		virtualIP:  virtualIP,
+		grpcCli:    grpcCli,
+		onIPPacket: onIP,
 	}, nil
 }
 
@@ -56,7 +63,23 @@ func (e *UDPEngine) readLoop() {
 			log.Printf("UDP read error: %v", err)
 			continue
 		}
-		e.handlePacket(buf[:n], addr)
+		if n < 1 {
+			continue
+		}
+
+		packetType := buf[0]
+		payload := buf[1:n]
+
+		switch packetType {
+		case PacketTypeData:
+			if e.onIPPacket != nil {
+				e.onIPPacket(payload)
+			}
+		case PacketTypeControl:
+			e.handlePacket(payload, addr)
+		default:
+			log.Printf("⚠️ Unknown packet type received: %d", packetType)
+		}
 	}
 }
 
@@ -101,12 +124,18 @@ func (e *UDPEngine) handlePacket(data []byte, addr *net.UDPAddr) {
 }
 
 func (e *UDPEngine) sendUDPStr(addr *net.UDPAddr, msg string) {
-	_, _ = e.conn.WriteToUDP([]byte(msg), addr)
+	buf := make([]byte, len(msg)+1)
+	buf[0] = PacketTypeControl
+	copy(buf[1:], msg)
+	_, _ = e.conn.WriteToUDP(buf, addr)
 }
 
 // SendRaw 暴露给 Data Pump，用于发送原生的 IPv4 数据包
 func (e *UDPEngine) SendRaw(data []byte, addr *net.UDPAddr) {
-	_, _ = e.conn.WriteToUDP(data, addr)
+	buf := make([]byte, len(data)+1)
+	buf[0] = PacketTypeData
+	copy(buf[1:], data)
+	_, _ = e.conn.WriteToUDP(buf, addr)
 }
 
 // Punch 向目标节点发起打洞

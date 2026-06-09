@@ -146,7 +146,17 @@ func (a *Node) initTunDevice() error {
 }
 
 func (a *Node) startUDPEngine(grpcClient pb.SignalingServiceClient) error {
-	engine, err := NewUDPEngine(a.virtualIP, a.peerTable, grpcClient)
+	engine, err := NewUDPEngine(a.virtualIP, a.peerTable, grpcClient, func(data []byte) {
+		if a.tunDevice != nil {
+			n, err := a.tunDevice.Write(data)
+			if err != nil {
+				log.Printf("TUN Write error: %v", err)
+			} else {
+				// log.Printf("📦 [UDP -> TUN] Injected %d bytes to network stack", n)
+				_ = n
+			}
+		}
+	})
 	if err != nil {
 		return fmt.Errorf("failed to start UDP engine: %w", err)
 	}
