@@ -114,3 +114,21 @@ func (pt *PeerTable) UpdateAddr(virtualIP string, addr *net.UDPAddr) {
 		p.LastActive = time.Now()
 	}
 }
+
+// GetAllPeers 返回当前 PeerTable 的所有节点快照
+func (pt *PeerTable) GetAllPeers() []*PeerConnection {
+	pt.mu.RLock()
+	defer pt.mu.RUnlock()
+
+	peers := make([]*PeerConnection, 0, len(pt.peers))
+	for _, p := range pt.peers {
+		peers = append(peers, &PeerConnection{
+			VirtualIP:     p.VirtualIP,
+			SignalingAddr: p.SignalingAddr,
+			PublicAddr:    p.PublicAddr,
+			State:         p.State,
+			LastActive:    p.LastActive,
+		})
+	}
+	return peers
+}

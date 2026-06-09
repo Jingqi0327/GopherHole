@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/Jingqi0327/GopherHole/proto/pb"
 )
@@ -53,6 +54,24 @@ func (e *UDPEngine) GetLocalPort() int {
 
 func (e *UDPEngine) Start() {
 	go e.readLoop()
+	go e.startKeepAlive()
+}
+
+func (e *UDPEngine) startKeepAlive() {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		<-ticker.C
+		peers := e.peerTable.GetAllPeers()
+		for _, peer := range peers {
+			// 对于正在打洞或者已经连通的节点，定时发送探测包维持 NAT 映射不超时
+			if peer.State == StateConnected || peer.State == StatePunching {
+				// 复用 PUNCH 信令作为 Keep-Alive，对端收到后会回复 PUNCH_ACK 并更新活跃时间
+				e.sendUDPStr(peer.PublicAddr, fmt.Sprintf("PUNCH:%s", e.virtualIP))
+			}
+		}
+	}
 }
 
 func (e *UDPEngine) readLoop() {
