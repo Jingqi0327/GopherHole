@@ -5,12 +5,13 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/Jingqi0327/GopherHole/proto/pb"
 	"github.com/Jingqi0327/GopherHole/pkg/tun"
+	"github.com/Jingqi0327/GopherHole/proto/pb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -65,10 +66,52 @@ func (a *App) Run() error {
 		return err
 	}
 
+	// 第五步：开启 Data Pump 出站协程 (TUN -> UDP)
+	a.startDataPumpOutbound()
+
 	// 阻塞当前主线程，处理交互式终端输入
 	a.handleTerminalInput()
 
 	return nil
+}
+
+func (a *App) startDataPumpOutbound() {
+	go func() {
+		buf := make([]byte, 2000) // MTU 1420，2000足够容纳
+		for {
+			n, err := a.tunDevice.Read(buf)
+			if err != nil {
+				log.Printf("TUN Read error: %v", err)
+				return
+			}
+
+			// 检查包长是否至少包含一个基础的 IPv4 头部 (20字节)
+			if n < 20 {
+				continue
+			}
+
+			// 检查是否为 IPv4 数据包 (IP 版本号位于第 1 个字节的高 4 位)
+			if buf[0]>>4 != 4 {
+				continue
+			}
+
+			// 解析目的 IP (IPv4 头部的第 16 到 19 字节是目的 IP)
+			destIP := net.IPv4(buf[16], buf[17], buf[18], buf[19]).String()
+
+			// 查找对方节点
+			peer := a.peerTable.GetPeer(destIP)
+			if peer != nil {
+				if peer.State == StateConnected {
+					// 已连通，直接通过 UDP 发送原生 IP 数据包
+					a.udpEngine.SendRaw(buf[:n], peer.PublicAddr)
+				} else if peer.State != StatePunching {
+					// 发现发往该 IP 的流量，但尚未连通，触发打洞
+					log.Printf("🚦 Traffic detected for %s, but not connected. Triggering hole punch...", destIP)
+					a.udpEngine.Punch(destIP)
+				}
+			}
+		}
+	}()
 }
 
 func (a *App) registerNode(grpcClient pb.SignalingServiceClient) error {

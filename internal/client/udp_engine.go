@@ -104,6 +104,11 @@ func (e *UDPEngine) sendUDPStr(addr *net.UDPAddr, msg string) {
 	_, _ = e.conn.WriteToUDP([]byte(msg), addr)
 }
 
+// SendRaw 暴露给 Data Pump，用于发送原生的 IPv4 数据包
+func (e *UDPEngine) SendRaw(data []byte, addr *net.UDPAddr) {
+	_, _ = e.conn.WriteToUDP(data, addr)
+}
+
 // Punch 向目标节点发起打洞
 func (e *UDPEngine) Punch(targetVirtualIP string) {
 	peer := e.peerTable.GetPeer(targetVirtualIP)
