@@ -168,8 +168,17 @@ func (e *UDPEngine) Punch(targetVirtualIP string) {
 	log.Printf("⏳ Starting hole punch to %s...", targetVirtualIP)
 	e.peerTable.UpdateState(targetVirtualIP, StatePunching)
 
-	// 1. 发送探测包
-	e.sendUDPStr(peer.PublicAddr, fmt.Sprintf("PUNCH:%s", e.virtualIP))
+	// 1. 启动一个高频重试协程，快速发送多次探测包（提升穿透成功率，对抗丢包和时序问题）
+	go func() {
+		for i := 0; i < 5; i++ {
+			p := e.peerTable.GetPeer(targetVirtualIP)
+			if p == nil || p.State == StateConnected {
+				return // 如果已经连通，直接停止发送探测
+			}
+			e.sendUDPStr(p.PublicAddr, fmt.Sprintf("PUNCH:%s", e.virtualIP))
+			time.Sleep(300 * time.Millisecond)
+		}
+	}()
 
 	// 2. 通过信令服务器下发打洞请求
 	req := &pb.SignalMessage{
@@ -191,7 +200,17 @@ func (e *UDPEngine) HandleSignal(sig *pb.SignalMessage) {
 			// 收到对方通过服务器转来的打洞请求，立刻向对方的公网地址发包协助打洞
 			log.Printf("🔔 Received punch request from %s, assisting...", sig.FromVirtualIp)
 			e.peerTable.UpdateState(sig.FromVirtualIp, StatePunching)
-			e.sendUDPStr(peer.PublicAddr, fmt.Sprintf("PUNCH:%s", e.virtualIP))
+			
+			go func() {
+				for i := 0; i < 5; i++ {
+					p := e.peerTable.GetPeer(sig.FromVirtualIp)
+					if p == nil || p.State == StateConnected {
+						return
+					}
+					e.sendUDPStr(p.PublicAddr, fmt.Sprintf("PUNCH:%s", e.virtualIP))
+					time.Sleep(300 * time.Millisecond)
+				}
+			}()
 		}
 	}
 }
