@@ -1,0 +1,77 @@
+package client
+
+import (
+	"bufio"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+
+	"github.com/Jingqi0327/GopherHole/proto/pb"
+)
+
+func (a *Node) handleTerminalInput() {
+	scanner := bufio.NewScanner(os.Stdin)
+	for {
+		// fmt.Print("> ") // 省略 prompt 以免干扰日志
+		if !scanner.Scan() {
+			break
+		}
+		text := strings.TrimSpace(scanner.Text())
+		if text == "" {
+			continue
+		}
+
+		parts := strings.SplitN(text, " ", 3)
+		cmd := strings.ToLower(parts[0])
+
+		switch cmd {
+		case "punch":
+			if len(parts) < 2 {
+				fmt.Println("Usage: punch <virtual_ip>")
+				continue
+			}
+			a.udpEngine.Punch(parts[1])
+		case "msg":
+			if len(parts) < 3 {
+				fmt.Println("Usage: msg <virtual_ip> <text>")
+				continue
+			}
+			a.udpEngine.SendMessage(parts[1], parts[2])
+		case "list":
+			// 可以增加一个打印本地 PeerTable 的命令
+			fmt.Println("Run 'list' to be implemented")
+		default:
+			fmt.Println("Unknown command. Supported: punch, msg")
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Printf("Terminal input error: %v", err)
+	}
+}
+
+// printPeers 在终端格式化打印当前所有的在线节点
+func (a *Node) printPeers(peers []*pb.RemotePeer) {
+	fmt.Println("\n================= 🟢 ONLINE PEERS =================")
+	for _, p := range peers {
+		marker := ""
+		if p.VirtualIp == a.virtualIP {
+			marker = "👈 (本节点/This Node)"
+		} else {
+			state := "Disconnected"
+			if peer := a.peerTable.GetPeer(p.VirtualIp); peer != nil {
+				switch peer.State {
+				case StatePunching:
+					state = "Punching..."
+				case StateConnected:
+					state = "Connected!"
+				}
+			}
+			marker = fmt.Sprintf("[%s]", state)
+		}
+		publicAddr := fmt.Sprintf("%s:%d", p.PublicIp, p.PublicPort)
+		fmt.Printf(" - Virtual IP: %-15s | Public: %-20s %s\n", p.VirtualIp, publicAddr, marker)
+	}
+	fmt.Println("===================================================")
+}
