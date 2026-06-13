@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Jingqi0327/GopherHole/pkg/tun"
@@ -15,12 +16,12 @@ import (
 )
 
 type Node struct {
-	hostname    string
-	serverAddr  string
-	virtualIP   string
-	peerTable   *PeerTable
-	udpEngine   *UDPEngine
-	tunDevice   tun.Tunnel
+	hostname   string
+	serverAddr string
+	virtualIP  string
+	peerTable  *PeerTable
+	udpEngine  *UDPEngine
+	tunDevice  tun.Tunnel
 }
 
 func NewNode(serverAddr, requestedIP, hostname string) *Node {
@@ -28,10 +29,10 @@ func NewNode(serverAddr, requestedIP, hostname string) *Node {
 		hostname, _ = os.Hostname()
 	}
 	return &Node{
-		hostname:    hostname,
-		serverAddr:  serverAddr,
-		virtualIP:   requestedIP,
-		peerTable:   NewPeerTable(),
+		hostname:   hostname,
+		serverAddr: serverAddr,
+		virtualIP:  requestedIP,
+		peerTable:  NewPeerTable(),
 	}
 }
 
@@ -63,13 +64,11 @@ func (a *Node) Run() error {
 		return err
 	}
 
-	// 第四步：开启心跳双向流，接收信令与节点状态
-	if err := a.startHeartbeatStream(grpcClient); err != nil {
-		return err
-	}
-
-	// 第五步：开启 Data Pump 出站协程 (TUN -> UDP)
+	// 第四步：开启 Data Pump 出站协程
 	a.startDataPumpOutbound()
+
+	// 第五步：开启心跳与重连守护协程
+	go a.keepaliveLoop(grpcClient)
 
 	// 阻塞当前主线程，处理交互式终端输入
 	a.handleTerminalInput()
@@ -170,11 +169,16 @@ func (a *Node) startUDPEngine(grpcClient pb.SignalingServiceClient) error {
 	return nil
 }
 
-func (a *Node) startHeartbeatStream(grpcClient pb.SignalingServiceClient) error {
-	stream, err := grpcClient.Heartbeat(context.Background())
+func (a *Node) runHeartbeatStream(grpcClient pb.SignalingServiceClient) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stream, err := grpcClient.Heartbeat(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to start heartbeat stream: %w", err)
 	}
+
+	errCh := make(chan error, 1)
 
 	// 开启协程，定时发送心跳
 	go func() {
@@ -185,10 +189,15 @@ func (a *Node) startHeartbeatStream(grpcClient pb.SignalingServiceClient) error 
 				PublicPort: int32(a.udpEngine.GetPublicPort()),
 			})
 			if err != nil {
-				log.Printf("Failed to send heartbeat: %v", err)
+				errCh <- err
 				return
 			}
-			time.Sleep(10 * time.Second)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Second):
+
+			}
 		}
 	}()
 
@@ -197,8 +206,7 @@ func (a *Node) startHeartbeatStream(grpcClient pb.SignalingServiceClient) error 
 		for {
 			resp, err := stream.Recv()
 			if err != nil {
-				log.Printf("\n⚠️ Stream disconnected from server: %v", err)
-				log.Printf("👉 Existing P2P connections remain active, but no new peers can be discovered.")
+				errCh <- err
 				return
 			}
 
@@ -213,5 +221,32 @@ func (a *Node) startHeartbeatStream(grpcClient pb.SignalingServiceClient) error 
 		}
 	}()
 
-	return nil
+	return <-errCh
+}
+
+func (a *Node) keepaliveLoop(grpcClient pb.SignalingServiceClient) {
+	for {
+		// 阻塞执行心跳流，直到流异常断开（比如网络断开、服务端重启）
+		err := a.runHeartbeatStream(grpcClient)
+		log.Printf("\n⚠️ Disconnected from server: %v. Existing P2P connections remain active.", err)
+
+		// 进入断线重连循环
+		for {
+			time.Sleep(5 * time.Second) // 退避等待
+			log.Printf("🔄 Attempting to reconnect and re-register with server...")
+
+			// a.virtualIP 此时保存的是我们断线前的 IP
+			// 这里会带着这个旧 IP 请求重新注册
+			err := a.registerNode(grpcClient)
+			if err == nil {
+				log.Printf("✅ Re-registration successful. Resuming heartbeat.")
+				break // 注册成功，跳出重试，回到外层重新执行 runHeartbeatStream
+			}
+
+			if strings.Contains(err.Error(), "AlreadyExists") || strings.Contains(err.Error(), "IP conflict") {
+				log.Fatalf("❌ Critical Error: The IP %s has been occupied by another node. Connection cannot be restored. Please restart the client to obtain a new IP!", a.virtualIP)
+			}
+			log.Printf("❌ Re-registration failed: %v. Retrying in 5 seconds...", err)
+		}
+	}
 }
