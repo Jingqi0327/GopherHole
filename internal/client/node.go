@@ -176,7 +176,7 @@ func (a *Node) startHeartbeatStream(grpcClient pb.SignalingServiceClient) error 
 		for {
 			err := stream.Send(&pb.HeartbeatRequest{
 				VirtualIp:  a.virtualIP,
-				PublicPort: int32(a.udpEngine.GetLocalPort()),
+				PublicPort: int32(a.udpEngine.GetPublicPort()),
 			})
 			if err != nil {
 				log.Printf("Failed to send heartbeat: %v", err)

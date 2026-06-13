@@ -23,6 +23,9 @@ type UDPEngine struct {
 	virtualIP  string
 	grpcCli    pb.SignalingServiceClient
 	onIPPacket func(data []byte)
+	publicPort int
+	publicIP   string
+	activeStun string
 }
 
 func NewUDPEngine(virtualIP string, pt *PeerTable, grpcCli pb.SignalingServiceClient, onIP func([]byte)) (*UDPEngine, error) {
@@ -38,9 +41,40 @@ func NewUDPEngine(virtualIP string, pt *PeerTable, grpcCli pb.SignalingServiceCl
 	localAddr := conn.LocalAddr().(*net.UDPAddr)
 	log.Printf("🚀 UDP Engine started on local port %d", localAddr.Port)
 
+	// 启动前先进行 STUN 探测，获取公网 IP 和 Port
+	// 必须在 e.Start() 的 readLoop 之前执行，否则 STUN 响应包会被 readLoop 截获
+	stunServers := []string{
+		"stun.miwifi.com:3478",
+		"stun.chat.bilibili.com:3478",
+		"stun.hitv.com:3478",
+	}
+
+	var pubIP string
+	var pubPort int
+	var activeStun string
+
+	for _, server := range stunServers {
+		log.Printf("🔍 Discovering public endpoint via STUN (%s)...", server)
+		pubIP, pubPort, err = DiscoverPublicEndpoint(conn, server)
+		if err == nil {
+			log.Printf("🌍 STUN discovery successful! Public IP: %s, Public Port: %d", pubIP, pubPort)
+			activeStun = server
+			break
+		}
+		log.Printf("⚠️ STUN discovery failed on %s: %v", server, err)
+	}
+
+	if err != nil {
+		log.Printf("❌ All STUN servers failed. Falling back to local port.")
+		pubPort = localAddr.Port
+	}
+
 	return &UDPEngine{
 		conn:       conn,
 		localPort:  localAddr.Port,
+		publicPort: pubPort,
+		publicIP:   pubIP,
+		activeStun: activeStun,
 		peerTable:  pt,
 		virtualIP:  virtualIP,
 		grpcCli:    grpcCli,
@@ -49,6 +83,14 @@ func NewUDPEngine(virtualIP string, pt *PeerTable, grpcCli pb.SignalingServiceCl
 }
 
 func (e *UDPEngine) GetLocalPort() int {
+	return e.localPort
+}
+
+// GetPublicPort 返回 STUN 探测到的公网端口，如果探测失败则回退返回本地端口
+func (e *UDPEngine) GetPublicPort() int {
+	if e.publicPort > 0 {
+		return e.publicPort
+	}
 	return e.localPort
 }
 
