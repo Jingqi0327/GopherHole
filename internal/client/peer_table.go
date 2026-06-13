@@ -17,6 +17,7 @@ const (
 )
 
 type PeerConnection struct {
+	Hostname      string
 	VirtualIP     string
 	SignalingAddr *net.UDPAddr // Server 下发的参考地址（用于感知节点重启或网络切换）
 	PublicAddr    *net.UDPAddr // 实际打通的公网地址（NAT 穿透后的真实端点）
@@ -46,24 +47,25 @@ func (pt *PeerTable) SyncPeers(onlinePeers []*pb.RemotePeer) {
 	}
 
 	// 1. 踢掉已经下线的节点
-	for vip := range pt.peers {
-		if _, ok := onlineMap[vip]; !ok {
-			delete(pt.peers, vip)
+	for virtualIP := range pt.peers {
+		if _, ok := onlineMap[virtualIP]; !ok {
+			delete(pt.peers, virtualIP)
 		}
 	}
 
 	// 2. 更新或添加在线节点
-	for vip, p := range onlineMap {
+	for virtualIP, p := range onlineMap {
 		sigAddr := &net.UDPAddr{
 			IP:   net.ParseIP(p.PublicIp),
 			Port: int(p.PublicPort),
 		}
 
-		existing, ok := pt.peers[vip]
+		existing, ok := pt.peers[virtualIP]
 		if !ok {
 			// 新上线的节点
-			pt.peers[vip] = &PeerConnection{
-				VirtualIP:     vip,
+			pt.peers[virtualIP] = &PeerConnection{
+				Hostname:      p.Hostname,
+				VirtualIP:     virtualIP,
 				SignalingAddr: sigAddr,
 				PublicAddr:    sigAddr, // 初始时，将信令地址作为预测的打洞地址
 				State:         StateDisconnected,
@@ -72,6 +74,7 @@ func (pt *PeerTable) SyncPeers(onlinePeers []*pb.RemotePeer) {
 			// 节点仍在运行，但如果信令服务器下发的端点发生了变化（IP变了或者绑定的本地UDP端口变了）
 			// 这意味着对方客户端重启了，或者网络环境切换了。之前的打洞状态完全失效！
 			if existing.SignalingAddr.String() != sigAddr.String() {
+				existing.Hostname = p.Hostname
 				existing.SignalingAddr = sigAddr
 				existing.PublicAddr = sigAddr // 重置预测地址
 				existing.State = StateDisconnected
@@ -86,6 +89,7 @@ func (pt *PeerTable) GetPeer(virtualIP string) *PeerConnection {
 	if p, ok := pt.peers[virtualIP]; ok {
 		// Return a copy
 		return &PeerConnection{
+			Hostname:      p.Hostname,
 			VirtualIP:     p.VirtualIP,
 			SignalingAddr: p.SignalingAddr,
 			PublicAddr:    p.PublicAddr,
@@ -123,6 +127,7 @@ func (pt *PeerTable) GetAllPeers() []*PeerConnection {
 	peers := make([]*PeerConnection, 0, len(pt.peers))
 	for _, p := range pt.peers {
 		peers = append(peers, &PeerConnection{
+			Hostname:      p.Hostname,
 			VirtualIP:     p.VirtualIP,
 			SignalingAddr: p.SignalingAddr,
 			PublicAddr:    p.PublicAddr,
@@ -131,4 +136,23 @@ func (pt *PeerTable) GetAllPeers() []*PeerConnection {
 		})
 	}
 	return peers
+}
+
+// ResolveVirtualIP tries to find the VirtualIP by the given target string.
+// If target is already a VirtualIP in the table, it returns it.
+// If target matches a Hostname in the table, it returns the corresponding VirtualIP.
+func (pt *PeerTable) ResolveVirtualIP(target string) string {
+	pt.mu.RLock()
+	defer pt.mu.RUnlock()
+
+	if _, ok := pt.peers[target]; ok {
+		return target
+	}
+
+	for virtualIP, p := range pt.peers {
+		if p.Hostname == target {
+			return virtualIP
+		}
+	}
+	return ""
 }

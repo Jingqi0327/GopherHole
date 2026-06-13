@@ -15,18 +15,22 @@ import (
 )
 
 type Node struct {
+	hostname    string
 	serverAddr  string
-	requestedIP string
 	virtualIP   string
 	peerTable   *PeerTable
 	udpEngine   *UDPEngine
 	tunDevice   tun.Tunnel
 }
 
-func NewNode(serverAddr, requestedIP string) *Node {
+func NewNode(serverAddr, requestedIP, hostname string) *Node {
+	if hostname == "" {
+		hostname, _ = os.Hostname()
+	}
 	return &Node{
+		hostname:    hostname,
 		serverAddr:  serverAddr,
-		requestedIP: requestedIP,
+		virtualIP:   requestedIP,
 		peerTable:   NewPeerTable(),
 	}
 }
@@ -113,10 +117,9 @@ func (a *Node) startDataPumpOutbound() {
 }
 
 func (a *Node) registerNode(grpcClient pb.SignalingServiceClient) error {
-	hostname, _ := os.Hostname()
 	regReq := &pb.RegisterRequest{
-		Hostname:    hostname,
-		RequestedIp: a.requestedIP,
+		RequestedHostname: a.hostname,
+		RequestedIp:       a.virtualIP,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -127,8 +130,10 @@ func (a *Node) registerNode(grpcClient pb.SignalingServiceClient) error {
 		return fmt.Errorf("registration failed: %w", err)
 	}
 
+	a.hostname = regResp.Hostname
 	a.virtualIP = regResp.VirtualIp
 	log.Printf("✅ Registration successful!")
+	log.Printf("🌐 Assigned Hostname: %s", a.hostname)
 	log.Printf("🌐 Assigned Virtual IP: %s", a.virtualIP)
 	log.Printf("🌍 Server sees our Public IP as: %s", regResp.PublicIp)
 	return nil
@@ -175,6 +180,7 @@ func (a *Node) startHeartbeatStream(grpcClient pb.SignalingServiceClient) error 
 	go func() {
 		for {
 			err := stream.Send(&pb.HeartbeatRequest{
+				Hostname:   a.hostname,
 				VirtualIp:  a.virtualIP,
 				PublicPort: int32(a.udpEngine.GetPublicPort()),
 			})
@@ -209,5 +215,3 @@ func (a *Node) startHeartbeatStream(grpcClient pb.SignalingServiceClient) error 
 
 	return nil
 }
-
-

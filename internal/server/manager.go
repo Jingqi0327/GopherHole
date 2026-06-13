@@ -8,6 +8,7 @@ import (
 )
 
 type Peer struct {
+	Hostname      string
 	VirtualIP     string
 	PublicIP      string
 	PublicPort    int32
@@ -18,9 +19,9 @@ type Peer struct {
 type PeerManager struct {
 	mu          sync.RWMutex
 	peers       map[string]*Peer
-	subscribers map[chan struct{}]struct{}   // 用于发布节点变动事件
+	subscribers map[chan struct{}]struct{}        // 用于发布节点变动事件
 	signalChans map[string]chan *pb.SignalMessage // 针对每个虚拟IP的信令推送通道
-	onRemove    func(virtualIP string)             // 节点移除时的回调函数
+	onRemove    func(virtualIP string)            // 节点移除时的回调函数
 }
 
 func NewPeerManager(onRemove func(virtualIP string)) *PeerManager {
@@ -33,13 +34,14 @@ func NewPeerManager(onRemove func(virtualIP string)) *PeerManager {
 }
 
 // AddOrUpdatePeer 添加或更新节点信息
-func (m *PeerManager) AddOrUpdatePeer(virtualIP, publicIP string, publicPort int32) {
+func (m *PeerManager) AddOrUpdatePeer(hostname, virtualIP, publicIP string, publicPort int32) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	p, exists := m.peers[virtualIP]
 	if !exists {
 		m.peers[virtualIP] = &Peer{
+			Hostname:      hostname,
 			VirtualIP:     virtualIP,
 			PublicIP:      publicIP,
 			PublicPort:    publicPort,
@@ -49,6 +51,7 @@ func (m *PeerManager) AddOrUpdatePeer(virtualIP, publicIP string, publicPort int
 		return
 	}
 
+	p.Hostname = hostname
 	p.PublicIP = publicIP
 	p.PublicPort = publicPort
 	p.LastHeartbeat = time.Now()
@@ -87,6 +90,7 @@ func (m *PeerManager) GetAllPeers() []*pb.RemotePeer {
 	var result []*pb.RemotePeer
 	for _, p := range m.peers {
 		result = append(result, &pb.RemotePeer{
+			Hostname:   p.Hostname,
 			VirtualIp:  p.VirtualIP,
 			PublicIp:   p.PublicIP,
 			PublicPort: p.PublicPort,

@@ -52,21 +52,35 @@ func NewUDPEngine(virtualIP string, pt *PeerTable, grpcCli pb.SignalingServiceCl
 	var pubIP string
 	var pubPort int
 	var activeStun string
+	endpoints := make(map[string]string)
 
 	for _, server := range stunServers {
 		log.Printf("🔍 Discovering public endpoint via STUN (%s)...", server)
-		pubIP, pubPort, err = DiscoverPublicEndpoint(conn, server)
+		ip, port, err := DiscoverPublicEndpoint(conn, server)
 		if err == nil {
-			log.Printf("🌍 STUN discovery successful! Public IP: %s, Public Port: %d", pubIP, pubPort)
-			activeStun = server
-			break
+			log.Printf("🌍 STUN discovery successful! Public IP: %s, Public Port: %d", ip, port)
+			if activeStun == "" {
+				pubIP = ip
+				pubPort = port
+				activeStun = server
+			}
+			endpoint := fmt.Sprintf("%s:%d", ip, port)
+			endpoints[endpoint] = server
+		} else {
+			log.Printf("⚠️ STUN discovery failed on %s: %v", server, err)
 		}
-		log.Printf("⚠️ STUN discovery failed on %s: %v", server, err)
 	}
 
-	if err != nil {
+	if len(endpoints) == 0 {
 		log.Printf("❌ All STUN servers failed. Falling back to local port.")
 		pubPort = localAddr.Port
+	} else if len(endpoints) > 1 {
+		log.Printf("⚠️ WARNING: Different public endpoints detected across STUN servers.")
+		for ep, srv := range endpoints {
+			log.Printf("   - %s returned: %s", srv, ep)
+		}
+		log.Printf("⚠️ This indicates you might be behind a Symmetric NAT (NAT4).")
+		log.Printf("⚠️ UDP Hole Punching is highly likely to FAIL in this network environment.")
 	}
 
 	return &UDPEngine{

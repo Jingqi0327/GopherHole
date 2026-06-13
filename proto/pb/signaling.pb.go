@@ -73,7 +73,7 @@ func (SignalMessage_Type) EnumDescriptor() ([]byte, []int) {
 type RegisterRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 可以包含主机名、OS信息或认证Token
-	Hostname string `protobuf:"bytes,1,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	RequestedHostname string `protobuf:"bytes,1,opt,name=requested_hostname,json=requestedHostname,proto3" json:"requested_hostname,omitempty"`
 	// 期望的固定虚拟 IP（如 "10.8.0.5"），如果为空则由 Server 自动分配
 	RequestedIp   string `protobuf:"bytes,2,opt,name=requested_ip,json=requestedIp,proto3" json:"requested_ip,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -110,9 +110,9 @@ func (*RegisterRequest) Descriptor() ([]byte, []int) {
 	return file_signaling_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *RegisterRequest) GetHostname() string {
+func (x *RegisterRequest) GetRequestedHostname() string {
 	if x != nil {
-		return x.Hostname
+		return x.RequestedHostname
 	}
 	return ""
 }
@@ -125,11 +125,12 @@ func (x *RegisterRequest) GetRequestedIp() string {
 }
 
 type RegisterResponse struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Hostname string                 `protobuf:"bytes,1,opt,name=hostname,proto3" json:"hostname,omitempty"`
 	// Server 分配给 Client 的虚拟 IP (例如: "10.8.0.2")
-	VirtualIp string `protobuf:"bytes,1,opt,name=virtual_ip,json=virtualIp,proto3" json:"virtual_ip,omitempty"`
+	VirtualIp string `protobuf:"bytes,2,opt,name=virtual_ip,json=virtualIp,proto3" json:"virtual_ip,omitempty"`
 	// 客户端在公网侧的出口 IP（用于辅助 NAT 探测）
-	PublicIp      string `protobuf:"bytes,2,opt,name=public_ip,json=publicIp,proto3" json:"public_ip,omitempty"`
+	PublicIp      string `protobuf:"bytes,3,opt,name=public_ip,json=publicIp,proto3" json:"public_ip,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -164,6 +165,13 @@ func (*RegisterResponse) Descriptor() ([]byte, []int) {
 	return file_signaling_proto_rawDescGZIP(), []int{1}
 }
 
+func (x *RegisterResponse) GetHostname() string {
+	if x != nil {
+		return x.Hostname
+	}
+	return ""
+}
+
 func (x *RegisterResponse) GetVirtualIp() string {
 	if x != nil {
 		return x.VirtualIp
@@ -180,9 +188,10 @@ func (x *RegisterResponse) GetPublicIp() string {
 
 type HeartbeatRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
-	VirtualIp string                 `protobuf:"bytes,1,opt,name=virtual_ip,json=virtualIp,proto3" json:"virtual_ip,omitempty"`
+	Hostname  string                 `protobuf:"bytes,1,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	VirtualIp string                 `protobuf:"bytes,2,opt,name=virtual_ip,json=virtualIp,proto3" json:"virtual_ip,omitempty"`
 	// 客户端当前的 UDP 监听端口（预留给打洞阶段）
-	PublicPort    int32 `protobuf:"varint,2,opt,name=public_port,json=publicPort,proto3" json:"public_port,omitempty"`
+	PublicPort    int32 `protobuf:"varint,3,opt,name=public_port,json=publicPort,proto3" json:"public_port,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -217,6 +226,13 @@ func (*HeartbeatRequest) Descriptor() ([]byte, []int) {
 	return file_signaling_proto_rawDescGZIP(), []int{2}
 }
 
+func (x *HeartbeatRequest) GetHostname() string {
+	if x != nil {
+		return x.Hostname
+	}
+	return ""
+}
+
 func (x *HeartbeatRequest) GetVirtualIp() string {
 	if x != nil {
 		return x.VirtualIp
@@ -234,9 +250,10 @@ func (x *HeartbeatRequest) GetPublicPort() int32 {
 // 定义一个在线节点的信息
 type RemotePeer struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	VirtualIp     string                 `protobuf:"bytes,1,opt,name=virtual_ip,json=virtualIp,proto3" json:"virtual_ip,omitempty"`
-	PublicIp      string                 `protobuf:"bytes,2,opt,name=public_ip,json=publicIp,proto3" json:"public_ip,omitempty"`
-	PublicPort    int32                  `protobuf:"varint,3,opt,name=public_port,json=publicPort,proto3" json:"public_port,omitempty"`
+	Hostname      string                 `protobuf:"bytes,1,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	VirtualIp     string                 `protobuf:"bytes,2,opt,name=virtual_ip,json=virtualIp,proto3" json:"virtual_ip,omitempty"`
+	PublicIp      string                 `protobuf:"bytes,3,opt,name=public_ip,json=publicIp,proto3" json:"public_ip,omitempty"`
+	PublicPort    int32                  `protobuf:"varint,4,opt,name=public_port,json=publicPort,proto3" json:"public_port,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -269,6 +286,13 @@ func (x *RemotePeer) ProtoReflect() protoreflect.Message {
 // Deprecated: Use RemotePeer.ProtoReflect.Descriptor instead.
 func (*RemotePeer) Descriptor() ([]byte, []int) {
 	return file_signaling_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *RemotePeer) GetHostname() string {
+	if x != nil {
+		return x.Hostname
+	}
+	return ""
 }
 
 func (x *RemotePeer) GetVirtualIp() string {
@@ -545,25 +569,28 @@ var File_signaling_proto protoreflect.FileDescriptor
 
 const file_signaling_proto_rawDesc = "" +
 	"\n" +
-	"\x0fsignaling.proto\x12\tsignaling\"P\n" +
-	"\x0fRegisterRequest\x12\x1a\n" +
-	"\bhostname\x18\x01 \x01(\tR\bhostname\x12!\n" +
-	"\frequested_ip\x18\x02 \x01(\tR\vrequestedIp\"N\n" +
-	"\x10RegisterResponse\x12\x1d\n" +
+	"\x0fsignaling.proto\x12\tsignaling\"c\n" +
+	"\x0fRegisterRequest\x12-\n" +
+	"\x12requested_hostname\x18\x01 \x01(\tR\x11requestedHostname\x12!\n" +
+	"\frequested_ip\x18\x02 \x01(\tR\vrequestedIp\"j\n" +
+	"\x10RegisterResponse\x12\x1a\n" +
+	"\bhostname\x18\x01 \x01(\tR\bhostname\x12\x1d\n" +
 	"\n" +
-	"virtual_ip\x18\x01 \x01(\tR\tvirtualIp\x12\x1b\n" +
-	"\tpublic_ip\x18\x02 \x01(\tR\bpublicIp\"R\n" +
-	"\x10HeartbeatRequest\x12\x1d\n" +
+	"virtual_ip\x18\x02 \x01(\tR\tvirtualIp\x12\x1b\n" +
+	"\tpublic_ip\x18\x03 \x01(\tR\bpublicIp\"n\n" +
+	"\x10HeartbeatRequest\x12\x1a\n" +
+	"\bhostname\x18\x01 \x01(\tR\bhostname\x12\x1d\n" +
 	"\n" +
-	"virtual_ip\x18\x01 \x01(\tR\tvirtualIp\x12\x1f\n" +
-	"\vpublic_port\x18\x02 \x01(\x05R\n" +
-	"publicPort\"i\n" +
-	"\n" +
-	"RemotePeer\x12\x1d\n" +
-	"\n" +
-	"virtual_ip\x18\x01 \x01(\tR\tvirtualIp\x12\x1b\n" +
-	"\tpublic_ip\x18\x02 \x01(\tR\bpublicIp\x12\x1f\n" +
+	"virtual_ip\x18\x02 \x01(\tR\tvirtualIp\x12\x1f\n" +
 	"\vpublic_port\x18\x03 \x01(\x05R\n" +
+	"publicPort\"\x85\x01\n" +
+	"\n" +
+	"RemotePeer\x12\x1a\n" +
+	"\bhostname\x18\x01 \x01(\tR\bhostname\x12\x1d\n" +
+	"\n" +
+	"virtual_ip\x18\x02 \x01(\tR\tvirtualIp\x12\x1b\n" +
+	"\tpublic_ip\x18\x03 \x01(\tR\bpublicIp\x12\x1f\n" +
+	"\vpublic_port\x18\x04 \x01(\x05R\n" +
 	"publicPort\"7\n" +
 	"\bPeerList\x12+\n" +
 	"\x05peers\x18\x01 \x03(\v2\x15.signaling.RemotePeerR\x05peers\"\x86\x01\n" +

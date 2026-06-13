@@ -19,29 +19,32 @@ service SignalingService {
 
 message RegisterRequest {
   // 可以包含主机名、OS信息或认证Token
-  string hostname = 1;
+  string requested_hostname = 1;
   // 期望的固定虚拟 IP（如 "10.8.0.5"），如果为空则由 Server 自动分配
   string requested_ip = 2;
 }
 
 message RegisterResponse {
+  string hostname = 1;
   // Server 分配给 Client 的虚拟 IP (例如: "10.8.0.2")
-  string virtual_ip = 1;
+  string virtual_ip = 2;
   // 客户端在公网侧的出口 IP（用于辅助 NAT 探测）
-  string public_ip = 2;
+  string public_ip = 3;
 }
 
 message HeartbeatRequest {
-  string virtual_ip = 1;
+  string hostname = 1;
+  string virtual_ip = 2;
   // 客户端当前的 UDP 监听端口（预留给打洞阶段）
-  int32 public_port = 2;
+  int32 public_port = 3;
 }
 
 // 定义一个在线节点的信息
 message RemotePeer {
-  string virtual_ip = 1;
-  string public_ip = 2;
-  int32 public_port = 3;
+  string hostname = 1;
+  string virtual_ip = 2;
+  string public_ip = 3;
+  int32 public_port = 4;
 }
 
 message PeerList {

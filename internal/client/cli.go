@@ -28,16 +28,24 @@ func (a *Node) handleTerminalInput() {
 		switch cmd {
 		case "punch":
 			if len(parts) < 2 {
-				fmt.Println("Usage: punch <virtual_ip>")
+				fmt.Println("Usage: punch <virtual_ip_or_hostname>")
 				continue
 			}
-			a.udpEngine.Punch(parts[1])
+			target := a.peerTable.ResolveVirtualIP(parts[1])
+			if target == "" {
+				target = parts[1] // fallback
+			}
+			a.udpEngine.Punch(target)
 		case "msg":
 			if len(parts) < 3 {
-				fmt.Println("Usage: msg <virtual_ip> <text>")
+				fmt.Println("Usage: msg <virtual_ip_or_hostname> <text>")
 				continue
 			}
-			a.udpEngine.SendMessage(parts[1], parts[2])
+			target := a.peerTable.ResolveVirtualIP(parts[1])
+			if target == "" {
+				target = parts[1]
+			}
+			a.udpEngine.SendMessage(target, parts[2])
 		case "list":
 			// 可以增加一个打印本地 PeerTable 的命令
 			fmt.Println("Run 'list' to be implemented")
@@ -53,7 +61,7 @@ func (a *Node) handleTerminalInput() {
 
 // printPeers 在终端格式化打印当前所有的在线节点
 func (a *Node) printPeers(peers []*pb.RemotePeer) {
-	fmt.Println("\n================= 🟢 ONLINE PEERS =================")
+	fmt.Println("\n============================================ 🟢 ONLINE PEERS ============================================")
 	for _, p := range peers {
 		marker := ""
 		if p.VirtualIp == a.virtualIP {
@@ -71,7 +79,7 @@ func (a *Node) printPeers(peers []*pb.RemotePeer) {
 			marker = fmt.Sprintf("[%s]", state)
 		}
 		publicAddr := fmt.Sprintf("%s:%d", p.PublicIp, p.PublicPort)
-		fmt.Printf(" - Virtual IP: %-15s | Public: %-20s %s\n", p.VirtualIp, publicAddr, marker)
+		fmt.Printf(" - | %-15s | Virtual IP: %-15s | Public IP: %-20s %s\n", p.Hostname, p.VirtualIp, publicAddr, marker)
 	}
-	fmt.Println("===================================================")
+	fmt.Println("=========================================================================================================")
 }
