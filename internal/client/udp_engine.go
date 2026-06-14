@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
@@ -117,13 +118,31 @@ func (e *UDPEngine) startKeepAlive() {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
+	// 构造一个简单的 STUN Binding Request 用于保活
+	stunReq := make([]byte, 20)
+	binary.BigEndian.PutUint16(stunReq[0:2], 0x0001)     // Message Type: Binding Request
+	binary.BigEndian.PutUint16(stunReq[2:4], 0x0000)     // Message Length: 0
+	binary.BigEndian.PutUint32(stunReq[4:8], 0x2112A442) // Magic Cookie
+	
+	var stunAddr *net.UDPAddr
+	if e.activeStun != "" {
+		stunAddr, _ = net.ResolveUDPAddr("udp", e.activeStun)
+	}
+
 	for {
 		<-ticker.C
+		
+		// 1. 向 STUN 服务器发送保活包，维持 NAT 映射的公网端口不被回收
+		if stunAddr != nil {
+			// 我们不需要读取响应，仅仅是为了让 NAT 路由器看到有从本地 UDP 端口发往外网的活跃流量
+			_, _ = e.conn.WriteToUDP(stunReq, stunAddr)
+		}
+
+		// 2. 对于正在打洞或者已经连通的节点，定时发送探测包维持 P2P 隧道不超时
 		peers := e.peerTable.GetAllPeers()
 		for _, peer := range peers {
-			// 对于正在打洞或者已经连通的节点，定时发送探测包维持 NAT 映射不超时
 			if peer.State == StateConnected || peer.State == StatePunching {
-				// 复用 PUNCH 信令作为 Keep-Alive，对端收到后会回复 PUNCH_ACK 并更新活跃时间
+				// 复用 PUNCH 信令作为 Keep-Alive
 				e.sendUDPStr(peer.PublicAddr, fmt.Sprintf("PUNCH:%s", e.virtualIP))
 			}
 		}
@@ -139,6 +158,12 @@ func (e *UDPEngine) readLoop() {
 			continue
 		}
 		if n < 1 {
+			continue
+		}
+
+		// STUN 协议的固定特征：第 4-7 字节是 Magic Cookie (0x2112A442)
+		// 我们盲发保活请求后，STUN 服务器发回的响应会被这里捕获。直接静默丢弃即可。
+		if n >= 20 && binary.BigEndian.Uint32(buf[4:8]) == 0x2112A442 {
 			continue
 		}
 
