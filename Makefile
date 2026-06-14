@@ -23,6 +23,8 @@ build-linux:
 	mkdir -p bin
 	GOOS=linux GOARCH=amd64 go build -o bin/server-linux-amd64 cmd/server/main.go
 	GOOS=linux GOARCH=amd64 go build -o bin/client-linux-amd64 cmd/client/main.go
+	GOOS=linux GOARCH=arm64 go build -o bin/client-linux-arm64 cmd/client/main.go
+	GOOS=linux GOARCH=arm GOARM=7 go build -o bin/client-linux-arm cmd/client/main.go
 
 build-darwin:
 	mkdir -p bin

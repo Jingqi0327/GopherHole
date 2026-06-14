@@ -9,8 +9,9 @@ import (
 
 // ClientConfig 客户端配置
 type ClientConfig struct {
-	Server string `mapstructure:"SERVER"`
-	IP     string `mapstructure:"IP"`
+	Hostname string `mapstructure:"HOSTNAME"`
+	Server   string `mapstructure:"SERVER"`
+	IP       string `mapstructure:"IP"`
 }
 
 // ServerConfig 服务端配置
@@ -35,14 +36,17 @@ func LoadClientConfig() (*ClientConfig, error) {
 
 	viper.SetDefault("SERVER", "127.0.0.1:8086")
 	viper.SetDefault("IP", "")
+	viper.SetDefault("HOSTNAME", "")
 
 	// 为了让命令行参数兼容大小写，我们手动绑定
 	pflag.String("server", "", "Signaling Server address")
 	pflag.String("ip", "", "Requested static Virtual IP (e.g. 10.8.0.5)")
+	pflag.String("hostname", "", "Hostname (e.g. Workstation-PC)")
 	pflag.Parse()
 
 	_ = viper.BindPFlag("SERVER", pflag.CommandLine.Lookup("server"))
 	_ = viper.BindPFlag("IP", pflag.CommandLine.Lookup("ip"))
+	_ = viper.BindPFlag("HOSTNAME", pflag.CommandLine.Lookup("hostname"))
 
 	var cfg ClientConfig
 	if err := viper.Unmarshal(&cfg); err != nil {

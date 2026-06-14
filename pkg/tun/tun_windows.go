@@ -17,7 +17,10 @@ func NewTunnel(name string, virtualIP string) (Tunnel, error) {
 	
 	config.PlatformSpecificParams = water.PlatformSpecificParams{
 		ComponentID: "tap0901",
-		Network:     getSubnet24(virtualIP),
+		// 传递本机的虚拟IP(10.8.0.100)和所在虚拟网段(/24),而不是直接传网段(10.8.0.0/24)
+		// water在解析时会解析出两部分:网卡地址和子网掩码,若仅传网段，会导致底层驱动认为网卡地址为10.8.0.0
+		// 从而导致驱动拦截并丢弃源/目的 IP 为本机的进出数据包（表现为可以建立UDP连接但双向 Ping 不通）。
+		Network:     virtualIP + "/24", 
 	}
 
 	ifce, err := water.New(config)

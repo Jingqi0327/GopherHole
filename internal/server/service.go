@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net"
 	"time"
@@ -37,9 +38,12 @@ func (s *SignalingService) Register(ctx context.Context, req *pb.RegisterRequest
 		}
 	}
 
-	virtualIP, err := s.ipam.Allocate(req.GetRequestedIp())
+	hostname, virtualIP, err := s.ipam.Allocate(req.GetRequestedHostname(), req.GetRequestedIp())
 	if err != nil {
-		return nil, status.Errorf(codes.AlreadyExists, "IP allocation failed: %v", err)
+		if errors.Is(err, ErrIPConflict) {
+			return nil, status.Errorf(codes.AlreadyExists, "IP allocation failed: %v", err)
+		}
+		return nil, status.Errorf(codes.Internal, "Registration failed: %v", err)
 	}
 
 	// 启动一个定时器，如果 30 秒内没有建立心跳（即未被加入到 PeerManager），则视为注册后客户端异常退出，主动释放 IP
@@ -51,9 +55,10 @@ func (s *SignalingService) Register(ctx context.Context, req *pb.RegisterRequest
 		}
 	}(virtualIP)
 
-	log.Printf("Node registered: %s (Public IP: %s), Assigned VirtualIP: %s", req.Hostname, publicIP, virtualIP)
+	log.Printf("Node registered: %s (Public IP: %s), Assigned VirtualIP: %s", hostname, publicIP, virtualIP)
 
 	return &pb.RegisterResponse{
+		Hostname:  hostname,
 		VirtualIp: virtualIP,
 		PublicIp:  publicIP,
 	}, nil
@@ -76,17 +81,17 @@ func (s *SignalingService) Heartbeat(stream pb.SignalingService_HeartbeatServer)
 		}
 	}
 
-	s.manager.AddOrUpdatePeer(req.VirtualIp, publicIP, req.PublicPort)
-	log.Printf("Node %s started heartbeat (Public Port: %d)", req.VirtualIp, req.PublicPort)
+	s.manager.AddOrUpdatePeer(req.GetHostname(), req.GetVirtualIp(), publicIP, req.GetPublicPort())
+	log.Printf("Node %s(%s) started heartbeat (Public Port: %d)", req.GetHostname(), req.GetVirtualIp(), req.GetPublicPort())
 
 	// 注册信令通道
-	signalCh := s.manager.RegisterSignalChannel(req.VirtualIp)
+	signalCh := s.manager.RegisterSignalChannel(req.GetVirtualIp())
 
 	// 断开时移除节点
 	defer func() {
-		log.Printf("Node %s disconnected", req.VirtualIp)
-		s.manager.UnregisterSignalChannel(req.VirtualIp)
-		s.manager.RemovePeer(req.VirtualIp)
+		log.Printf("Node %s(%s) disconnected", req.GetHostname(), req.GetVirtualIp())
+		s.manager.UnregisterSignalChannel(req.GetVirtualIp())
+		s.manager.RemovePeer(req.GetVirtualIp())
 	}()
 
 	// 订阅节点列表变动
@@ -112,7 +117,7 @@ func (s *SignalingService) Heartbeat(stream pb.SignalingService_HeartbeatServer)
 				errCh <- err
 				return
 			}
-			s.manager.AddOrUpdatePeer(req.VirtualIp, publicIP, req.PublicPort)
+			s.manager.AddOrUpdatePeer(req.GetHostname(), req.GetVirtualIp(), publicIP, req.GetPublicPort())
 		}
 	}()
 
@@ -152,7 +157,7 @@ func (s *SignalingService) Heartbeat(stream pb.SignalingService_HeartbeatServer)
 // SignalRoute 处理客户端发送的信令路由请求
 func (s *SignalingService) SignalRoute(ctx context.Context, req *pb.SignalMessage) (*pb.SignalMessageAck, error) {
 	log.Printf("Routing signal [%v] from %s to %s", req.Type, req.FromVirtualIp, req.ToVirtualIp)
-	
+
 	success := s.manager.RouteSignal(req.ToVirtualIp, req)
 	if !success {
 		log.Printf("Failed to route signal to %s (Offline or channel full)", req.ToVirtualIp)

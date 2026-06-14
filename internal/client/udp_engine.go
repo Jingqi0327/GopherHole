@@ -2,23 +2,34 @@ package client
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/Jingqi0327/GopherHole/proto/pb"
 )
 
+const (
+	PacketTypeData    byte = 0x01
+	PacketTypeControl byte = 0x02
+)
+
 type UDPEngine struct {
-	conn      *net.UDPConn
-	localPort int
-	peerTable *PeerTable
-	virtualIP string
-	grpcCli   pb.SignalingServiceClient
+	conn       *net.UDPConn
+	localPort  int
+	peerTable  *PeerTable
+	virtualIP  string
+	grpcCli    pb.SignalingServiceClient
+	onIPPacket func(data []byte)
+	publicPort int
+	publicIP   string
+	activeStun string
 }
 
-func NewUDPEngine(virtualIP string, pt *PeerTable, grpcCli pb.SignalingServiceClient) (*UDPEngine, error) {
+func NewUDPEngine(virtualIP string, pt *PeerTable, grpcCli pb.SignalingServiceClient, onIP func([]byte)) (*UDPEngine, error) {
 	addr, err := net.ResolveUDPAddr("udp", ":0") // Bind to any available port
 	if err != nil {
 		return nil, err
@@ -31,12 +42,58 @@ func NewUDPEngine(virtualIP string, pt *PeerTable, grpcCli pb.SignalingServiceCl
 	localAddr := conn.LocalAddr().(*net.UDPAddr)
 	log.Printf("🚀 UDP Engine started on local port %d", localAddr.Port)
 
+	// 启动前先进行 STUN 探测，获取公网 IP 和 Port
+	// 必须在 e.Start() 的 readLoop 之前执行，否则 STUN 响应包会被 readLoop 截获
+	stunServers := []string{
+		"stun.miwifi.com:3478",
+		"stun.chat.bilibili.com:3478",
+		"stun.hitv.com:3478",
+	}
+
+	var pubIP string
+	var pubPort int
+	var activeStun string
+	endpoints := make(map[string]string)
+
+	for _, server := range stunServers {
+		log.Printf("🔍 Discovering public endpoint via STUN (%s)...", server)
+		ip, port, err := DiscoverPublicEndpoint(conn, server)
+		if err == nil {
+			log.Printf("🌍 STUN discovery successful! Public IP: %s, Public Port: %d", ip, port)
+			if activeStun == "" {
+				pubIP = ip
+				pubPort = port
+				activeStun = server
+			}
+			endpoint := fmt.Sprintf("%s:%d", ip, port)
+			endpoints[endpoint] = server
+		} else {
+			log.Printf("⚠️ STUN discovery failed on %s: %v", server, err)
+		}
+	}
+
+	if len(endpoints) == 0 {
+		log.Printf("❌ All STUN servers failed. Falling back to local port.")
+		pubPort = localAddr.Port
+	} else if len(endpoints) > 1 {
+		log.Printf("⚠️ WARNING: Different public endpoints detected across STUN servers.")
+		for ep, srv := range endpoints {
+			log.Printf("   - %s returned: %s", srv, ep)
+		}
+		log.Printf("⚠️ This indicates you might be behind a Symmetric NAT (NAT4).")
+		log.Printf("⚠️ UDP Hole Punching is highly likely to FAIL in this network environment.")
+	}
+
 	return &UDPEngine{
-		conn:      conn,
-		localPort: localAddr.Port,
-		peerTable: pt,
-		virtualIP: virtualIP,
-		grpcCli:   grpcCli,
+		conn:       conn,
+		localPort:  localAddr.Port,
+		publicPort: pubPort,
+		publicIP:   pubIP,
+		activeStun: activeStun,
+		peerTable:  pt,
+		virtualIP:  virtualIP,
+		grpcCli:    grpcCli,
+		onIPPacket: onIP,
 	}, nil
 }
 
@@ -44,8 +101,52 @@ func (e *UDPEngine) GetLocalPort() int {
 	return e.localPort
 }
 
+// GetPublicPort 返回 STUN 探测到的公网端口，如果探测失败则回退返回本地端口
+func (e *UDPEngine) GetPublicPort() int {
+	if e.publicPort > 0 {
+		return e.publicPort
+	}
+	return e.localPort
+}
+
 func (e *UDPEngine) Start() {
 	go e.readLoop()
+	go e.startKeepAlive()
+}
+
+func (e *UDPEngine) startKeepAlive() {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	// 构造一个简单的 STUN Binding Request 用于保活
+	stunReq := make([]byte, 20)
+	binary.BigEndian.PutUint16(stunReq[0:2], 0x0001)     // Message Type: Binding Request
+	binary.BigEndian.PutUint16(stunReq[2:4], 0x0000)     // Message Length: 0
+	binary.BigEndian.PutUint32(stunReq[4:8], 0x2112A442) // Magic Cookie
+	
+	var stunAddr *net.UDPAddr
+	if e.activeStun != "" {
+		stunAddr, _ = net.ResolveUDPAddr("udp", e.activeStun)
+	}
+
+	for {
+		<-ticker.C
+		
+		// 1. 向 STUN 服务器发送保活包，维持 NAT 映射的公网端口不被回收
+		if stunAddr != nil {
+			// 我们不需要读取响应，仅仅是为了让 NAT 路由器看到有从本地 UDP 端口发往外网的活跃流量
+			_, _ = e.conn.WriteToUDP(stunReq, stunAddr)
+		}
+
+		// 2. 对于正在打洞或者已经连通的节点，定时发送探测包维持 P2P 隧道不超时
+		peers := e.peerTable.GetAllPeers()
+		for _, peer := range peers {
+			if peer.State == StateConnected || peer.State == StatePunching {
+				// 复用 PUNCH 信令作为 Keep-Alive
+				e.sendUDPStr(peer.PublicAddr, fmt.Sprintf("PUNCH:%s", e.virtualIP))
+			}
+		}
+	}
 }
 
 func (e *UDPEngine) readLoop() {
@@ -56,19 +157,42 @@ func (e *UDPEngine) readLoop() {
 			log.Printf("UDP read error: %v", err)
 			continue
 		}
-		e.handlePacket(buf[:n], addr)
+		if n < 1 {
+			continue
+		}
+
+		// STUN 协议的固定特征：第 4-7 字节是 Magic Cookie (0x2112A442)
+		// 我们盲发保活请求后，STUN 服务器发回的响应会被这里捕获。直接静默丢弃即可。
+		if n >= 20 && binary.BigEndian.Uint32(buf[4:8]) == 0x2112A442 {
+			continue
+		}
+
+		packetType := buf[0]
+		payload := buf[1:n]
+
+		switch packetType {
+		case PacketTypeData:
+			if e.onIPPacket != nil {
+				e.onIPPacket(payload)
+			}
+		case PacketTypeControl:
+			e.handlePacket(payload, addr)
+		default:
+			log.Printf("⚠️ Unknown packet type received: %d", packetType)
+		}
 	}
 }
 
 func (e *UDPEngine) handlePacket(data []byte, addr *net.UDPAddr) {
 	msg := string(data)
-	parts := strings.SplitN(msg, ":", 3)
+	parts := strings.SplitN(msg, ":", 3) //msg格式 PUNCH:virtualIP、PUNCH_ACK:virtualIP、MSG:virtualIP:text
 	if len(parts) < 2 {
 		return
 	}
-	
+
 	cmd := parts[0]
 	fromVirtualIP := parts[1]
+
 
 	// 无论收到什么包，更新该节点的实际公网端点（这对于穿越 Symmetric NAT 很关键，因为信令服务器看到的端口可能和双方互打的端口不同）
 	e.peerTable.UpdateAddr(fromVirtualIP, addr)
@@ -100,7 +224,18 @@ func (e *UDPEngine) handlePacket(data []byte, addr *net.UDPAddr) {
 }
 
 func (e *UDPEngine) sendUDPStr(addr *net.UDPAddr, msg string) {
-	_, _ = e.conn.WriteToUDP([]byte(msg), addr)
+	buf := make([]byte, len(msg)+1)
+	buf[0] = PacketTypeControl
+	copy(buf[1:], msg)
+	_, _ = e.conn.WriteToUDP(buf, addr)
+}
+
+// SendRaw 暴露给 Data Pump，用于发送原生的 IPv4 数据包
+func (e *UDPEngine) SendRaw(data []byte, addr *net.UDPAddr) {
+	buf := make([]byte, len(data)+1)
+	buf[0] = PacketTypeData
+	copy(buf[1:], data)
+	_, _ = e.conn.WriteToUDP(buf, addr)
 }
 
 // Punch 向目标节点发起打洞
@@ -114,8 +249,17 @@ func (e *UDPEngine) Punch(targetVirtualIP string) {
 	log.Printf("⏳ Starting hole punch to %s...", targetVirtualIP)
 	e.peerTable.UpdateState(targetVirtualIP, StatePunching)
 
-	// 1. 发送探测包
-	e.sendUDPStr(peer.PublicAddr, fmt.Sprintf("PUNCH:%s", e.virtualIP))
+	// 1. 启动一个高频重试协程，快速发送多次探测包（提升穿透成功率，对抗丢包和时序问题）
+	go func() {
+		for i := 0; i < 5; i++ {
+			p := e.peerTable.GetPeer(targetVirtualIP)
+			if p == nil || p.State == StateConnected {
+				return // 如果已经连通，直接停止发送探测
+			}
+			e.sendUDPStr(p.PublicAddr, fmt.Sprintf("PUNCH:%s", e.virtualIP))
+			time.Sleep(300 * time.Millisecond)
+		}
+	}()
 
 	// 2. 通过信令服务器下发打洞请求
 	req := &pb.SignalMessage{
@@ -137,7 +281,17 @@ func (e *UDPEngine) HandleSignal(sig *pb.SignalMessage) {
 			// 收到对方通过服务器转来的打洞请求，立刻向对方的公网地址发包协助打洞
 			log.Printf("🔔 Received punch request from %s, assisting...", sig.FromVirtualIp)
 			e.peerTable.UpdateState(sig.FromVirtualIp, StatePunching)
-			e.sendUDPStr(peer.PublicAddr, fmt.Sprintf("PUNCH:%s", e.virtualIP))
+			
+			go func() {
+				for i := 0; i < 5; i++ {
+					p := e.peerTable.GetPeer(sig.FromVirtualIp)
+					if p == nil || p.State == StateConnected {
+						return
+					}
+					e.sendUDPStr(p.PublicAddr, fmt.Sprintf("PUNCH:%s", e.virtualIP))
+					time.Sleep(300 * time.Millisecond)
+				}
+			}()
 		}
 	}
 }
