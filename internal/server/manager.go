@@ -91,7 +91,7 @@ func (m *PeerManager) GetAllPeers() []*pb.RemotePeer {
 	for _, p := range m.peers {
 		result = append(result, &pb.RemotePeer{
 			Hostname:   p.Hostname,
-			VirtualIp:  p.VirtualIP,
+			VirtualIP:  p.VirtualIP,
 			PublicIp:   p.PublicIP,
 			PublicPort: p.PublicPort,
 		})

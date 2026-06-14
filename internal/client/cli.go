@@ -47,10 +47,9 @@ func (a *Node) handleTerminalInput() {
 			}
 			a.udpEngine.SendMessage(target, parts[2])
 		case "list":
-			// 可以增加一个打印本地 PeerTable 的命令
-			fmt.Println("Run 'list' to be implemented")
+			a.listPeers()
 		default:
-			fmt.Println("Unknown command. Supported: punch, msg")
+			fmt.Println("Unknown command. Supported: punch, msg, list")
 		}
 	}
 
@@ -64,11 +63,11 @@ func (a *Node) printPeers(peers []*pb.RemotePeer) {
 	fmt.Println("\n============================================ 🟢 ONLINE PEERS ============================================")
 	for _, p := range peers {
 		marker := ""
-		if p.VirtualIp == a.virtualIP {
-			marker = "👈 (本节点/This Node)"
+		if p.VirtualIP == a.virtualIP {
+			marker = "👈 (This Node)"
 		} else {
 			state := "Disconnected"
-			if peer := a.peerTable.GetPeer(p.VirtualIp); peer != nil {
+			if peer := a.peerTable.GetPeer(p.VirtualIP); peer != nil {
 				switch peer.State {
 				case StatePunching:
 					state = "Punching..."
@@ -79,7 +78,32 @@ func (a *Node) printPeers(peers []*pb.RemotePeer) {
 			marker = fmt.Sprintf("[%s]", state)
 		}
 		publicAddr := fmt.Sprintf("%s:%d", p.PublicIp, p.PublicPort)
-		fmt.Printf(" - | %-15s | Virtual IP: %-15s | Public IP: %-20s %s\n", p.Hostname, p.VirtualIp, publicAddr, marker)
+		fmt.Printf(" - | %-15s | Virtual IP: %-15s | Public IP: %-20s %s\n", p.Hostname, p.VirtualIP, publicAddr, marker)
+	}
+	fmt.Println("=========================================================================================================")
+}
+
+func (a *Node) listPeers() {
+	peers := a.peerTable.GetAllPeers()
+
+	fmt.Println("\n============================================ 🟢 ONLINE PEERS ============================================")
+	for _, p := range peers {
+		marker := ""
+		if p.VirtualIP == a.virtualIP {
+			marker = "👈 (This Node)"
+		} else {
+			state := "Disconnected"
+			if peer := a.peerTable.GetPeer(p.VirtualIP); peer != nil {
+				switch peer.State {
+				case StatePunching:
+					state = "Punching..."
+				case StateConnected:
+					state = "Connected!"
+				}
+			}
+			marker = fmt.Sprintf("[%s]", state)
+		}
+		fmt.Printf(" - | %-15s | Virtual IP: %-15s | Public IP: %-20s %s\n", p.Hostname, p.VirtualIP, p.PublicAddr.String(), marker)
 	}
 	fmt.Println("=========================================================================================================")
 }

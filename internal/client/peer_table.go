@@ -43,7 +43,7 @@ func (pt *PeerTable) SyncPeers(onlinePeers []*pb.RemotePeer) {
 
 	onlineMap := make(map[string]*pb.RemotePeer)
 	for _, p := range onlinePeers {
-		onlineMap[p.VirtualIp] = p
+		onlineMap[p.VirtualIP] = p
 	}
 
 	// 1. 踢掉已经下线的节点

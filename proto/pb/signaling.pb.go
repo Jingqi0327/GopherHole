@@ -7,11 +7,12 @@
 package pb
 
 import (
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
-	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
+
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 )
 
 const (
@@ -251,7 +252,7 @@ func (x *HeartbeatRequest) GetPublicPort() int32 {
 type RemotePeer struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Hostname      string                 `protobuf:"bytes,1,opt,name=hostname,proto3" json:"hostname,omitempty"`
-	VirtualIp     string                 `protobuf:"bytes,2,opt,name=virtual_ip,json=virtualIp,proto3" json:"virtual_ip,omitempty"`
+	VirtualIP     string                 `protobuf:"bytes,2,opt,name=virtual_ip,json=virtualIp,proto3" json:"virtual_ip,omitempty"`
 	PublicIp      string                 `protobuf:"bytes,3,opt,name=public_ip,json=publicIp,proto3" json:"public_ip,omitempty"`
 	PublicPort    int32                  `protobuf:"varint,4,opt,name=public_port,json=publicPort,proto3" json:"public_port,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -297,7 +298,7 @@ func (x *RemotePeer) GetHostname() string {
 
 func (x *RemotePeer) GetVirtualIp() string {
 	if x != nil {
-		return x.VirtualIp
+		return x.VirtualIP
 	}
 	return ""
 }
