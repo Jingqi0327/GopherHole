@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net"
@@ -9,39 +10,61 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Jingqi0327/GopherHole/internal/config"
+	"github.com/Jingqi0327/GopherHole/pkg/auth"
+	"github.com/Jingqi0327/GopherHole/pkg/crypto"
 	"github.com/Jingqi0327/GopherHole/pkg/tun"
 	"github.com/Jingqi0327/GopherHole/proto/pb"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 )
 
 type Node struct {
+	cfg        *config.ClientConfig
 	hostname   string
-	serverAddr string
 	virtualIP  string
 	peerTable  *PeerTable
 	udpEngine  *UDPEngine
 	tunDevice  tun.Tunnel
 }
 
-func NewNode(serverAddr, requestedIP, hostname string) *Node {
+func NewNode(cfg *config.ClientConfig) *Node {
+	hostname := cfg.Hostname
 	if hostname == "" {
 		hostname, _ = os.Hostname()
 	}
 	return &Node{
+		cfg:        cfg,
 		hostname:   hostname,
-		serverAddr: serverAddr,
-		virtualIP:  requestedIP,
+		virtualIP:  cfg.IP,
 		peerTable:  NewPeerTable(),
 	}
 }
 
-// Run 启动客户端的核心生命周期
 func (a *Node) Run() error {
-	log.Printf("Connecting to Signaling Server at %s...", a.serverAddr)
+	log.Printf("Connecting to Signaling Server at %s...", a.cfg.Server)
+
+	// 构建特殊的 tls.Config
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: true, // 跳过域名校验
+	}
+	if a.cfg.ServerPubKey != "" {
+		tlsConfig.VerifyPeerCertificate = crypto.VerifyPeerPublicKey(a.cfg.ServerPubKey) // 核心：精准指纹狙击
+	} else {
+		log.Println("⚠️ WARNING: Server Public Key not provided. Connection is NOT secure against MITM attacks.")
+	}
+
+	var opts []grpc.DialOption
+	opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
+
+	if a.cfg.Token != "" {
+		opts = append(opts, grpc.WithPerRPCCredentials(auth.NewTokenAuth(a.cfg.Token)))
+	}
 
 	// 连接 Server
-	conn, err := grpc.NewClient(a.serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(a.cfg.Server, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}
@@ -126,6 +149,9 @@ func (a *Node) registerNode(grpcClient pb.SignalingServiceClient) error {
 
 	regResp, err := grpcClient.Register(ctx, regReq)
 	if err != nil {
+		if status.Code(err) == codes.Unauthenticated {
+			log.Fatalf("❌ FATAL: Authentication Failed (Invalid Token). Exiting.")
+		}
 		return fmt.Errorf("registration failed: %w", err)
 	}
 

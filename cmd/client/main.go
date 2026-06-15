@@ -20,7 +20,7 @@ func main() {
 
 	log.Println("GopherHole Client is starting...")
 
-	node := client.NewNode(cfg.Server, cfg.IP, cfg.Hostname)
+	node := client.NewNode(cfg)
 	if err := node.Run(); err != nil {
 		log.Fatalf("Client error: %v", err)
 	}
