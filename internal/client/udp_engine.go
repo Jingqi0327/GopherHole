@@ -22,14 +22,14 @@ type UDPEngine struct {
 	localPort  int
 	peerTable  *PeerTable
 	virtualIP  string
-	grpcCli    pb.SignalingServiceClient
+	grpcClient pb.SignalingServiceClient
 	onIPPacket func(data []byte)
 	publicPort int
 	publicIP   string
 	activeStun string
 }
 
-func NewUDPEngine(virtualIP string, pt *PeerTable, grpcCli pb.SignalingServiceClient, onIP func([]byte)) (*UDPEngine, error) {
+func NewUDPEngine(virtualIP string, pt *PeerTable, grpcClient pb.SignalingServiceClient, onIP func([]byte)) (*UDPEngine, error) {
 	addr, err := net.ResolveUDPAddr("udp", ":0") // Bind to any available port
 	if err != nil {
 		return nil, err
@@ -92,7 +92,7 @@ func NewUDPEngine(virtualIP string, pt *PeerTable, grpcCli pb.SignalingServiceCl
 		activeStun: activeStun,
 		peerTable:  pt,
 		virtualIP:  virtualIP,
-		grpcCli:    grpcCli,
+		grpcClient: grpcClient,
 		onIPPacket: onIP,
 	}, nil
 }
@@ -123,7 +123,7 @@ func (e *UDPEngine) startKeepAlive() {
 	binary.BigEndian.PutUint16(stunReq[0:2], 0x0001)     // Message Type: Binding Request
 	binary.BigEndian.PutUint16(stunReq[2:4], 0x0000)     // Message Length: 0
 	binary.BigEndian.PutUint32(stunReq[4:8], 0x2112A442) // Magic Cookie
-	
+
 	var stunAddr *net.UDPAddr
 	if e.activeStun != "" {
 		stunAddr, _ = net.ResolveUDPAddr("udp", e.activeStun)
@@ -131,7 +131,7 @@ func (e *UDPEngine) startKeepAlive() {
 
 	for {
 		<-ticker.C
-		
+
 		// 1. 向 STUN 服务器发送保活包，维持 NAT 映射的公网端口不被回收
 		if stunAddr != nil {
 			// 我们不需要读取响应，仅仅是为了让 NAT 路由器看到有从本地 UDP 端口发往外网的活跃流量
@@ -143,7 +143,7 @@ func (e *UDPEngine) startKeepAlive() {
 		for _, peer := range peers {
 			if peer.State == StateConnected || peer.State == StatePunching {
 				// 复用 PUNCH 信令作为 Keep-Alive
-				e.sendUDPStr(peer.PublicAddr, fmt.Sprintf("PUNCH:%s", e.virtualIP))
+				e.sendUDPStr(peer.PublicAddr, peer.VirtualIP, fmt.Sprintf("PUNCH:%s", e.virtualIP))
 			}
 		}
 	}
@@ -168,15 +168,34 @@ func (e *UDPEngine) readLoop() {
 		}
 
 		packetType := buf[0]
-		payload := buf[1:n]
+
+		if n < 5 {
+			continue // 太短
+		}
+
+		srcIPBytes := buf[1:5]
+		srcIP := net.IPv4(srcIPBytes[0], srcIPBytes[1], srcIPBytes[2], srcIPBytes[3]).String()
+		ciphertext := buf[5:n]
+
+		peer := e.peerTable.GetPeer(srcIP)
+		if peer == nil || peer.Cipher == nil {
+			// 未知来源或未协商好密钥，丢弃
+			continue
+		}
+
+		plaintext, err := peer.Cipher.Decrypt(ciphertext)
+		if err != nil {
+			log.Printf("⚠️ Failed to decrypt packet from %s: %v", srcIP, err)
+			continue
+		}
 
 		switch packetType {
 		case PacketTypeData:
 			if e.onIPPacket != nil {
-				e.onIPPacket(payload)
+				e.onIPPacket(plaintext)
 			}
 		case PacketTypeControl:
-			e.handlePacket(payload, addr)
+			e.handlePacket(plaintext, addr)
 		default:
 			log.Printf("⚠️ Unknown packet type received: %d", packetType)
 		}
@@ -193,7 +212,6 @@ func (e *UDPEngine) handlePacket(data []byte, addr *net.UDPAddr) {
 	cmd := parts[0]
 	fromVirtualIP := parts[1]
 
-
 	// 无论收到什么包，更新该节点的实际公网端点（这对于穿越 Symmetric NAT 很关键，因为信令服务器看到的端口可能和双方互打的端口不同）
 	e.peerTable.UpdateAddr(fromVirtualIP, addr)
 
@@ -207,7 +225,7 @@ func (e *UDPEngine) handlePacket(data []byte, addr *net.UDPAddr) {
 				fmt.Printf("\n🎉 [Hole Punched] %s <-> %s\n", e.virtualIP, fromVirtualIP)
 			}
 			// 回复 ACK
-			e.sendUDPStr(addr, fmt.Sprintf("PUNCH_ACK:%s", e.virtualIP))
+			e.sendUDPStr(addr, fromVirtualIP, fmt.Sprintf("PUNCH_ACK:%s", e.virtualIP))
 		}
 	case "PUNCH_ACK":
 		// 收到对方的探测响应
@@ -223,18 +241,36 @@ func (e *UDPEngine) handlePacket(data []byte, addr *net.UDPAddr) {
 	}
 }
 
-func (e *UDPEngine) sendUDPStr(addr *net.UDPAddr, msg string) {
-	buf := make([]byte, len(msg)+1)
+func (e *UDPEngine) sendUDPStr(addr *net.UDPAddr, destVirtualIP string, msg string) {
+	peer := e.peerTable.GetPeer(destVirtualIP)
+	if peer == nil || peer.Cipher == nil {
+		return
+	}
+	ciphertext := peer.Cipher.Encrypt([]byte(msg))
+	srcIPBytes := net.ParseIP(e.virtualIP).To4()
+
+	buf := make([]byte, 1+4+len(ciphertext))
 	buf[0] = PacketTypeControl
-	copy(buf[1:], msg)
+	copy(buf[1:5], srcIPBytes)
+	copy(buf[5:], ciphertext)
+
 	_, _ = e.conn.WriteToUDP(buf, addr)
 }
 
 // SendRaw 暴露给 Data Pump，用于发送原生的 IPv4 数据包
-func (e *UDPEngine) SendRaw(data []byte, addr *net.UDPAddr) {
-	buf := make([]byte, len(data)+1)
+func (e *UDPEngine) SendRaw(data []byte, addr *net.UDPAddr, destVirtualIP string) {
+	peer := e.peerTable.GetPeer(destVirtualIP)
+	if peer == nil || peer.Cipher == nil {
+		return
+	}
+	ciphertext := peer.Cipher.Encrypt(data)
+	srcIPBytes := net.ParseIP(e.virtualIP).To4()
+
+	buf := make([]byte, 1+4+len(ciphertext))
 	buf[0] = PacketTypeData
-	copy(buf[1:], data)
+	copy(buf[1:5], srcIPBytes)
+	copy(buf[5:], ciphertext)
+
 	_, _ = e.conn.WriteToUDP(buf, addr)
 }
 
@@ -256,7 +292,7 @@ func (e *UDPEngine) Punch(targetVirtualIP string) {
 			if p == nil || p.State == StateConnected {
 				return // 如果已经连通，直接停止发送探测
 			}
-			e.sendUDPStr(p.PublicAddr, fmt.Sprintf("PUNCH:%s", e.virtualIP))
+			e.sendUDPStr(p.PublicAddr, targetVirtualIP, fmt.Sprintf("PUNCH:%s", e.virtualIP))
 			time.Sleep(300 * time.Millisecond)
 		}
 	}()
@@ -267,7 +303,7 @@ func (e *UDPEngine) Punch(targetVirtualIP string) {
 		ToVirtualIp:   targetVirtualIP,
 		Type:          pb.SignalMessage_REQUEST_PUNCH,
 	}
-	_, err := e.grpcCli.SignalRoute(context.Background(), req)
+	_, err := e.grpcClient.SignalRoute(context.Background(), req)
 	if err != nil {
 		log.Printf("⚠️ Failed to route signal: %v", err)
 	}
@@ -281,14 +317,14 @@ func (e *UDPEngine) HandleSignal(sig *pb.SignalMessage) {
 			// 收到对方通过服务器转来的打洞请求，立刻向对方的公网地址发包协助打洞
 			log.Printf("🔔 Received punch request from %s, assisting...", sig.FromVirtualIp)
 			e.peerTable.UpdateState(sig.FromVirtualIp, StatePunching)
-			
+
 			go func() {
 				for i := 0; i < 5; i++ {
 					p := e.peerTable.GetPeer(sig.FromVirtualIp)
 					if p == nil || p.State == StateConnected {
 						return
 					}
-					e.sendUDPStr(p.PublicAddr, fmt.Sprintf("PUNCH:%s", e.virtualIP))
+					e.sendUDPStr(p.PublicAddr, sig.FromVirtualIp, fmt.Sprintf("PUNCH:%s", e.virtualIP))
 					time.Sleep(300 * time.Millisecond)
 				}
 			}()
@@ -303,5 +339,5 @@ func (e *UDPEngine) SendMessage(targetVirtualIP, text string) {
 		log.Printf("❌ Cannot send message: not connected to %s", targetVirtualIP)
 		return
 	}
-	e.sendUDPStr(peer.PublicAddr, fmt.Sprintf("MSG:%s:%s", e.virtualIP, text))
+	e.sendUDPStr(peer.PublicAddr, targetVirtualIP, fmt.Sprintf("MSG:%s:%s", e.virtualIP, text))
 }

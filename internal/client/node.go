@@ -28,6 +28,8 @@ type Node struct {
 	peerTable  *PeerTable
 	udpEngine  *UDPEngine
 	tunDevice  tun.Tunnel
+	privateKey [32]byte
+	publicKey  [32]byte
 }
 
 func NewNode(cfg *config.ClientConfig) *Node {
@@ -35,33 +37,26 @@ func NewNode(cfg *config.ClientConfig) *Node {
 	if hostname == "" {
 		hostname, _ = os.Hostname()
 	}
+
+	privateKey, pubKey, err := crypto.GenerateCurve25519Keypair()
+	if err != nil {
+		log.Fatalf("Failed to generate Curve25519 keypair: %v", err)
+	}
+
 	return &Node{
 		cfg:        cfg,
 		hostname:   hostname,
 		virtualIP:  cfg.IP,
-		peerTable:  NewPeerTable(),
+		peerTable:  NewPeerTable(privateKey),
+		privateKey: privateKey,
+		publicKey:  pubKey,
 	}
 }
 
 func (a *Node) Run() error {
 	log.Printf("Connecting to Signaling Server at %s...", a.cfg.Server)
 
-	// 构建特殊的 tls.Config
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true, // 跳过域名校验
-	}
-	if a.cfg.ServerPubKey != "" {
-		tlsConfig.VerifyPeerCertificate = crypto.VerifyPeerPublicKey(a.cfg.ServerPubKey) // 核心：精准指纹狙击
-	} else {
-		log.Println("⚠️ WARNING: Server Public Key not provided. Connection is NOT secure against MITM attacks.")
-	}
-
-	var opts []grpc.DialOption
-	opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
-
-	if a.cfg.Token != "" {
-		opts = append(opts, grpc.WithPerRPCCredentials(auth.NewTokenAuth(a.cfg.Token)))
-	}
+	opts := a.initgRPCopts()
 
 	// 连接 Server
 	conn, err := grpc.NewClient(a.cfg.Server, opts...)
@@ -120,18 +115,18 @@ func (a *Node) startDataPumpOutbound() {
 			}
 
 			// 解析目的 IP (IPv4 头部的第 16 到 19 字节是目的 IP)
-			destIP := net.IPv4(buf[16], buf[17], buf[18], buf[19]).String()
+			destVitrualIP := net.IPv4(buf[16], buf[17], buf[18], buf[19]).String()
 
 			// 查找对方节点
-			peer := a.peerTable.GetPeer(destIP)
+			peer := a.peerTable.GetPeer(destVitrualIP)
 			if peer != nil {
 				if peer.State == StateConnected {
 					// 已连通，直接通过 UDP 发送原生 IP 数据包
-					a.udpEngine.SendRaw(buf[:n], peer.PublicAddr)
+					a.udpEngine.SendRaw(buf[:n], peer.PublicAddr, destVitrualIP)
 				} else if peer.State != StatePunching {
 					// 发现发往该 IP 的流量，但尚未连通，触发打洞
-					log.Printf("🚦 Traffic detected for %s, but not connected. Triggering hole punch...", destIP)
-					a.udpEngine.Punch(destIP)
+					log.Printf("🚦 Traffic detected for %s, but not connected. Triggering hole punch...", destVitrualIP)
+					a.udpEngine.Punch(destVitrualIP)
 				}
 			}
 		}
@@ -213,6 +208,7 @@ func (a *Node) runHeartbeatStream(grpcClient pb.SignalingServiceClient) error {
 				Hostname:   a.hostname,
 				VirtualIp:  a.virtualIP,
 				PublicPort: int32(a.udpEngine.GetPublicPort()),
+				PublicKey:  a.publicKey[:],
 			})
 			if err != nil {
 				errCh <- err
@@ -275,4 +271,25 @@ func (a *Node) keepaliveLoop(grpcClient pb.SignalingServiceClient) {
 			log.Printf("❌ Re-registration failed: %v. Retrying in 5 seconds...", err)
 		}
 	}
+}
+
+
+func (a *Node) initgRPCopts() []grpc.DialOption {
+	// 构建特殊的 tls.Config
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: true, // 跳过域名校验
+	}
+	if a.cfg.ServerPubKey != "" {
+		tlsConfig.VerifyPeerCertificate = crypto.VerifyPeerPublicKey(a.cfg.ServerPubKey) // 核心：精准指纹狙击
+	} else {
+		log.Println("⚠️ WARNING: Server Public Key not provided. Connection is NOT secure against MITM attacks.")
+	}
+
+	var opts []grpc.DialOption
+	opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
+
+	if a.cfg.Token != "" {
+		opts = append(opts, grpc.WithPerRPCCredentials(auth.NewTokenAuth(a.cfg.Token)))
+	}
+	return opts
 }
