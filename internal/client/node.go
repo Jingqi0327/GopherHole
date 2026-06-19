@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Jingqi0327/GopherHole/internal/config"
@@ -54,13 +55,14 @@ func NewNode(cfg *config.ClientConfig) *Node {
 }
 
 func (a *Node) Run() error {
-	log.Printf("Connecting to Signaling Server at %s...", a.cfg.Server)
+	stopAnim := startAnimation(fmt.Sprintf("🔄 Connecting to Signaling Server at %s", a.cfg.Server))
 
 	opts := a.initgRPCopts()
 
 	// 连接 Server
 	conn, err := grpc.NewClient(a.cfg.Server, opts...)
 	if err != nil {
+		stopAnim(true)
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}
 	defer conn.Close()
@@ -68,7 +70,8 @@ func (a *Node) Run() error {
 	grpcClient := pb.NewSignalingServiceClient(conn)
 
 	// 第一步：注册节点并获取 Virtual IP
-	if err := a.registerNode(grpcClient); err != nil {
+	if err := a.registerNode(grpcClient, stopAnim); err != nil {
+		stopAnim(true)
 		return err
 	}
 
@@ -133,7 +136,7 @@ func (a *Node) startDataPumpOutbound() {
 	}()
 }
 
-func (a *Node) registerNode(grpcClient pb.SignalingServiceClient) error {
+func (a *Node) registerNode(grpcClient pb.SignalingServiceClient, stopAnim func(bool)) error {
 	regReq := &pb.RegisterRequest{
 		RequestedHostname: a.hostname,
 		RequestedIp:       a.virtualIP,
@@ -145,6 +148,7 @@ func (a *Node) registerNode(grpcClient pb.SignalingServiceClient) error {
 	regResp, err := grpcClient.Register(ctx, regReq)
 	if err != nil {
 		if status.Code(err) == codes.Unauthenticated {
+			stopAnim(true) // 清除动画
 			log.Fatalf("❌ FATAL: Authentication Failed (Invalid Token). Exiting.")
 		}
 		return fmt.Errorf("registration failed: %w", err)
@@ -152,6 +156,7 @@ func (a *Node) registerNode(grpcClient pb.SignalingServiceClient) error {
 
 	a.hostname = regResp.Hostname
 	a.virtualIP = regResp.VirtualIp
+	stopAnim(true) // 清除输出，避免和前面的动画在一行
 	log.Printf("✅ Registration successful!")
 	log.Printf("🌐 Assigned Hostname: %s", a.hostname)
 	log.Printf("🌐 Assigned Virtual IP: %s", a.virtualIP)
@@ -253,22 +258,32 @@ func (a *Node) keepaliveLoop(grpcClient pb.SignalingServiceClient) {
 		log.Printf("\n⚠️ Disconnected from server: %v. Existing P2P connections remain active.", err)
 
 		// 进入断线重连循环
+		var lastErrMsg string
 		for {
-			time.Sleep(5 * time.Second) // 退避等待
-			log.Printf("🔄 Attempting to reconnect and re-register with server...")
+			stopAnim := startAnimation("🔄 Waiting to reconnect")
+			time.Sleep(4000 * time.Millisecond)
 
 			// a.virtualIP 此时保存的是我们断线前的 IP
 			// 这里会带着这个旧 IP 请求重新注册
-			err := a.registerNode(grpcClient)
+			err := a.registerNode(grpcClient, stopAnim)
 			if err == nil {
 				log.Printf("✅ Re-registration successful. Resuming heartbeat.")
 				break // 注册成功，跳出重试，回到外层重新执行 runHeartbeatStream
 			}
 
 			if strings.Contains(err.Error(), "AlreadyExists") || strings.Contains(err.Error(), "IP conflict") {
+				stopAnim(true) // 清除动画
 				log.Fatalf("❌ Critical Error: The IP %s has been occupied by another node. Connection cannot be restored. Please restart the client to obtain a new IP!", a.virtualIP)
 			}
-			log.Printf("❌ Re-registration failed: %v. Retrying in 5 seconds...", err)
+			
+			errMsg := err.Error()
+			if errMsg != lastErrMsg {
+				stopAnim(true) // 有新错误时清除动画，干干净净打印错误
+				log.Printf("❌ Re-registration failed: %v. Retrying...", err)
+				lastErrMsg = errMsg
+			} else {
+				stopAnim(false) // 同样的错误，保留行不清除
+			}
 		}
 	}
 }
@@ -292,4 +307,39 @@ func (a *Node) initgRPCopts() []grpc.DialOption {
 		opts = append(opts, grpc.WithPerRPCCredentials(auth.NewTokenAuth(a.cfg.Token)))
 	}
 	return opts
+}
+
+func startAnimation(msg string) func(bool) {
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		frames := []string{"[=    ]", "[ =   ]", "[  =  ]", "[   = ]", "[    =]", "[   = ]", "[  =  ]", "[ =   ]"}
+		i := 0
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		fmt.Printf("\r%s %s", msg, frames[0])
+		i++
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				fmt.Printf("\r%s %s", msg, frames[i%len(frames)])
+				i++
+			}
+		}
+	}()
+
+	var once sync.Once
+	return func(clearLine bool) {
+		once.Do(func() {
+			close(done)
+			wg.Wait()
+			if clearLine {
+				fmt.Printf("\r\033[K")
+			}
+		})
+	}
 }
