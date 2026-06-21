@@ -37,6 +37,8 @@ message HeartbeatRequest {
   string virtual_ip = 2;
   // 客户端当前的 UDP 监听端口（预留给打洞阶段）
   int32 public_port = 3;
+  // Client端的公钥,用于p2p隧道的加密
+  bytes public_key = 4;
 }
 
 // 定义一个在线节点的信息
@@ -45,6 +47,7 @@ message RemotePeer {
   string virtual_ip = 2;
   string public_ip = 3;
   int32 public_port = 4;
+  bytes public_key = 5;
 }
 
 message PeerList {

@@ -2,47 +2,67 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/Jingqi0327/GopherHole/internal/config"
+	"github.com/Jingqi0327/GopherHole/pkg/auth"
+	"github.com/Jingqi0327/GopherHole/pkg/crypto"
 	"github.com/Jingqi0327/GopherHole/pkg/tun"
 	"github.com/Jingqi0327/GopherHole/proto/pb"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 )
 
 type Node struct {
+	cfg        *config.ClientConfig
 	hostname   string
-	serverAddr string
 	virtualIP  string
 	peerTable  *PeerTable
 	udpEngine  *UDPEngine
 	tunDevice  tun.Tunnel
+	privateKey [32]byte
+	publicKey  [32]byte
 }
 
-func NewNode(serverAddr, requestedIP, hostname string) *Node {
+func NewNode(cfg *config.ClientConfig) *Node {
+	hostname := cfg.Hostname
 	if hostname == "" {
 		hostname, _ = os.Hostname()
 	}
+
+	privateKey, pubKey, err := crypto.GenerateCurve25519Keypair()
+	if err != nil {
+		log.Fatalf("Failed to generate Curve25519 keypair: %v", err)
+	}
+
 	return &Node{
+		cfg:        cfg,
 		hostname:   hostname,
-		serverAddr: serverAddr,
-		virtualIP:  requestedIP,
-		peerTable:  NewPeerTable(),
+		virtualIP:  cfg.IP,
+		peerTable:  NewPeerTable(privateKey),
+		privateKey: privateKey,
+		publicKey:  pubKey,
 	}
 }
 
-// Run 启动客户端的核心生命周期
 func (a *Node) Run() error {
-	log.Printf("Connecting to Signaling Server at %s...", a.serverAddr)
+	stopAnim := startAnimation(fmt.Sprintf("🔄 Connecting to Signaling Server at %s", a.cfg.Server))
+
+	opts := a.initgRPCopts()
 
 	// 连接 Server
-	conn, err := grpc.NewClient(a.serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(a.cfg.Server, opts...)
 	if err != nil {
+		stopAnim(true)
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}
 	defer conn.Close()
@@ -50,7 +70,8 @@ func (a *Node) Run() error {
 	grpcClient := pb.NewSignalingServiceClient(conn)
 
 	// 第一步：注册节点并获取 Virtual IP
-	if err := a.registerNode(grpcClient); err != nil {
+	if err := a.registerNode(grpcClient, stopAnim); err != nil {
+		stopAnim(true)
 		return err
 	}
 
@@ -97,25 +118,25 @@ func (a *Node) startDataPumpOutbound() {
 			}
 
 			// 解析目的 IP (IPv4 头部的第 16 到 19 字节是目的 IP)
-			destIP := net.IPv4(buf[16], buf[17], buf[18], buf[19]).String()
+			destVitrualIP := net.IPv4(buf[16], buf[17], buf[18], buf[19]).String()
 
 			// 查找对方节点
-			peer := a.peerTable.GetPeer(destIP)
+			peer := a.peerTable.GetPeer(destVitrualIP)
 			if peer != nil {
 				if peer.State == StateConnected {
 					// 已连通，直接通过 UDP 发送原生 IP 数据包
-					a.udpEngine.SendRaw(buf[:n], peer.PublicAddr)
+					a.udpEngine.SendRaw(buf[:n], peer.PublicAddr, destVitrualIP)
 				} else if peer.State != StatePunching {
 					// 发现发往该 IP 的流量，但尚未连通，触发打洞
-					log.Printf("🚦 Traffic detected for %s, but not connected. Triggering hole punch...", destIP)
-					a.udpEngine.Punch(destIP)
+					log.Printf("🚦 Traffic detected for %s, but not connected. Triggering hole punch...", destVitrualIP)
+					a.udpEngine.Punch(destVitrualIP)
 				}
 			}
 		}
 	}()
 }
 
-func (a *Node) registerNode(grpcClient pb.SignalingServiceClient) error {
+func (a *Node) registerNode(grpcClient pb.SignalingServiceClient, stopAnim func(bool)) error {
 	regReq := &pb.RegisterRequest{
 		RequestedHostname: a.hostname,
 		RequestedIp:       a.virtualIP,
@@ -126,11 +147,16 @@ func (a *Node) registerNode(grpcClient pb.SignalingServiceClient) error {
 
 	regResp, err := grpcClient.Register(ctx, regReq)
 	if err != nil {
+		if status.Code(err) == codes.Unauthenticated {
+			stopAnim(true) // 清除动画
+			log.Fatalf("❌ FATAL: Authentication Failed (Invalid Token). Exiting.")
+		}
 		return fmt.Errorf("registration failed: %w", err)
 	}
 
 	a.hostname = regResp.Hostname
 	a.virtualIP = regResp.VirtualIp
+	stopAnim(true) // 清除输出，避免和前面的动画在一行
 	log.Printf("✅ Registration successful!")
 	log.Printf("🌐 Assigned Hostname: %s", a.hostname)
 	log.Printf("🌐 Assigned Virtual IP: %s", a.virtualIP)
@@ -187,6 +213,7 @@ func (a *Node) runHeartbeatStream(grpcClient pb.SignalingServiceClient) error {
 				Hostname:   a.hostname,
 				VirtualIp:  a.virtualIP,
 				PublicPort: int32(a.udpEngine.GetPublicPort()),
+				PublicKey:  a.publicKey[:],
 			})
 			if err != nil {
 				errCh <- err
@@ -231,22 +258,88 @@ func (a *Node) keepaliveLoop(grpcClient pb.SignalingServiceClient) {
 		log.Printf("\n⚠️ Disconnected from server: %v. Existing P2P connections remain active.", err)
 
 		// 进入断线重连循环
+		var lastErrMsg string
 		for {
-			time.Sleep(5 * time.Second) // 退避等待
-			log.Printf("🔄 Attempting to reconnect and re-register with server...")
+			stopAnim := startAnimation("🔄 Waiting to reconnect")
+			time.Sleep(4000 * time.Millisecond)
 
 			// a.virtualIP 此时保存的是我们断线前的 IP
 			// 这里会带着这个旧 IP 请求重新注册
-			err := a.registerNode(grpcClient)
+			err := a.registerNode(grpcClient, stopAnim)
 			if err == nil {
 				log.Printf("✅ Re-registration successful. Resuming heartbeat.")
 				break // 注册成功，跳出重试，回到外层重新执行 runHeartbeatStream
 			}
 
 			if strings.Contains(err.Error(), "AlreadyExists") || strings.Contains(err.Error(), "IP conflict") {
+				stopAnim(true) // 清除动画
 				log.Fatalf("❌ Critical Error: The IP %s has been occupied by another node. Connection cannot be restored. Please restart the client to obtain a new IP!", a.virtualIP)
 			}
-			log.Printf("❌ Re-registration failed: %v. Retrying in 5 seconds...", err)
+			
+			errMsg := err.Error()
+			if errMsg != lastErrMsg {
+				stopAnim(true) // 有新错误时清除动画，干干净净打印错误
+				log.Printf("❌ Re-registration failed: %v. Retrying...", err)
+				lastErrMsg = errMsg
+			} else {
+				stopAnim(false) // 同样的错误，保留行不清除
+			}
 		}
+	}
+}
+
+
+func (a *Node) initgRPCopts() []grpc.DialOption {
+	// 构建特殊的 tls.Config
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: true, // 跳过域名校验
+	}
+	if a.cfg.ServerPubKey != "" {
+		tlsConfig.VerifyPeerCertificate = crypto.VerifyPeerPublicKey(a.cfg.ServerPubKey) // 核心：精准指纹狙击
+	} else {
+		log.Println("⚠️ WARNING: Server Public Key not provided. Connection is NOT secure against MITM attacks.")
+	}
+
+	var opts []grpc.DialOption
+	opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
+
+	if a.cfg.Token != "" {
+		opts = append(opts, grpc.WithPerRPCCredentials(auth.NewTokenAuth(a.cfg.Token)))
+	}
+	return opts
+}
+
+func startAnimation(msg string) func(bool) {
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		frames := []string{"[=    ]", "[ =   ]", "[  =  ]", "[   = ]", "[    =]", "[   = ]", "[  =  ]", "[ =   ]"}
+		i := 0
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		fmt.Printf("\r%s %s", msg, frames[0])
+		i++
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				fmt.Printf("\r%s %s", msg, frames[i%len(frames)])
+				i++
+			}
+		}
+	}()
+
+	var once sync.Once
+	return func(clearLine bool) {
+		once.Do(func() {
+			close(done)
+			wg.Wait()
+			if clearLine {
+				fmt.Printf("\r\033[K")
+			}
+		})
 	}
 }

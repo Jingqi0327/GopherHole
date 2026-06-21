@@ -63,11 +63,11 @@ func (a *Node) printPeers(peers []*pb.RemotePeer) {
 	fmt.Println("\n============================================ 🟢 ONLINE PEERS ============================================")
 	for _, p := range peers {
 		marker := ""
-		if p.VirtualIP == a.virtualIP {
+		if p.VirtualIp == a.virtualIP {
 			marker = "👈 (This Node)"
 		} else {
 			state := "Disconnected"
-			if peer := a.peerTable.GetPeer(p.VirtualIP); peer != nil {
+			if peer := a.peerTable.GetPeer(p.VirtualIp); peer != nil {
 				switch peer.State {
 				case StatePunching:
 					state = "Punching..."
@@ -78,7 +78,7 @@ func (a *Node) printPeers(peers []*pb.RemotePeer) {
 			marker = fmt.Sprintf("[%s]", state)
 		}
 		publicAddr := fmt.Sprintf("%s:%d", p.PublicIp, p.PublicPort)
-		fmt.Printf(" - | %-15s | Virtual IP: %-15s | Public IP: %-20s %s\n", p.Hostname, p.VirtualIP, publicAddr, marker)
+		fmt.Printf(" - | %-15s | Virtual IP: %-15s | Public IP: %-20s %s\n", p.Hostname, p.VirtualIp, publicAddr, marker)
 	}
 	fmt.Println("=========================================================================================================")
 }

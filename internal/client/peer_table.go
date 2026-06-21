@@ -1,10 +1,13 @@
 package client
 
 import (
+	"bytes"
+	"log"
 	"net"
 	"sync"
 	"time"
 
+	"github.com/Jingqi0327/GopherHole/pkg/crypto"
 	"github.com/Jingqi0327/GopherHole/proto/pb"
 )
 
@@ -21,18 +24,43 @@ type PeerConnection struct {
 	VirtualIP     string
 	SignalingAddr *net.UDPAddr // Server 下发的参考地址（用于感知节点重启或网络切换）
 	PublicAddr    *net.UDPAddr // 实际打通的公网地址（NAT 穿透后的真实端点）
+	PublicKey     []byte       // Client端的公钥,用于p2p隧道的加密
+	Cipher        *crypto.SymmetricCipher
 	State         PeerState
 	LastActive    time.Time
 }
 
 type PeerTable struct {
-	mu    sync.RWMutex
-	peers map[string]*PeerConnection
+	mu         sync.RWMutex
+	peers      map[string]*PeerConnection
+	privateKey [32]byte
 }
 
-func NewPeerTable() *PeerTable {
+func (pt *PeerTable) createCipher(peerPubKey []byte) *crypto.SymmetricCipher {
+	if len(peerPubKey) != 32 {
+		return nil
+	}
+	var pubKey32 [32]byte
+	copy(pubKey32[:], peerPubKey)
+	
+	sharedSecret, err := crypto.ComputeSharedSecret(pt.privateKey, pubKey32)
+	if err != nil {
+		log.Printf("⚠️ Failed to compute shared secret: %v", err)
+		return nil
+	}
+	sessionKey := crypto.DeriveSessionKey(sharedSecret)
+	cipher, err := crypto.NewSymmetricCipher(sessionKey)
+	if err != nil {
+		log.Printf("⚠️ Failed to create symmetric cipher: %v", err)
+		return nil
+	}
+	return cipher
+}
+
+func NewPeerTable(privateKey [32]byte) *PeerTable {
 	return &PeerTable{
-		peers: make(map[string]*PeerConnection),
+		peers:      make(map[string]*PeerConnection),
+		privateKey: privateKey,
 	}
 }
 
@@ -43,7 +71,7 @@ func (pt *PeerTable) SyncPeers(onlinePeers []*pb.RemotePeer) {
 
 	onlineMap := make(map[string]*pb.RemotePeer)
 	for _, p := range onlinePeers {
-		onlineMap[p.VirtualIP] = p
+		onlineMap[p.VirtualIp] = p
 	}
 
 	// 1. 踢掉已经下线的节点
@@ -68,9 +96,17 @@ func (pt *PeerTable) SyncPeers(onlinePeers []*pb.RemotePeer) {
 				VirtualIP:     virtualIP,
 				SignalingAddr: sigAddr,
 				PublicAddr:    sigAddr, // 初始时，将信令地址作为预测的打洞地址
+				PublicKey:     p.PublicKey,
+				Cipher:        nil, // 懒加载，在首次通信时通过 GetPeer 触发生成
 				State:         StateDisconnected,
 			}
-		} else {
+		} else { // TODO: 重新处理下PeerConnection的逻辑================
+			// 检查公钥是否变更 (意味着对方重启了进程)
+			if !bytes.Equal(existing.PublicKey, p.PublicKey) {
+				existing.PublicKey = p.PublicKey
+				existing.Cipher = nil // 懒加载
+				existing.State = StateDisconnected
+			}
 			// 节点仍在运行，但如果信令服务器下发的端点发生了变化（IP变了或者绑定的本地UDP端口变了）
 			// 这意味着对方客户端重启了，或者网络环境切换了。之前的打洞状态完全失效！
 			if existing.SignalingAddr.String() != sigAddr.String() {
@@ -85,19 +121,52 @@ func (pt *PeerTable) SyncPeers(onlinePeers []*pb.RemotePeer) {
 
 func (pt *PeerTable) GetPeer(virtualIP string) *PeerConnection {
 	pt.mu.RLock()
-	defer pt.mu.RUnlock()
-	if p, ok := pt.peers[virtualIP]; ok {
-		// Return a copy
-		return &PeerConnection{
+	p, ok := pt.peers[virtualIP]
+	if !ok {
+		pt.mu.RUnlock()
+		return nil
+	}
+	
+	// 如果 Cipher 已经就绪，直接拷贝返回
+	if p.Cipher != nil {
+		copyPeer := &PeerConnection{
 			Hostname:      p.Hostname,
 			VirtualIP:     p.VirtualIP,
 			SignalingAddr: p.SignalingAddr,
 			PublicAddr:    p.PublicAddr,
+			PublicKey:     p.PublicKey,
+			Cipher:        p.Cipher,
 			State:         p.State,
 			LastActive:    p.LastActive,
 		}
+		pt.mu.RUnlock()
+		return copyPeer
 	}
-	return nil
+	pt.mu.RUnlock()
+
+	// Cipher 为空，升级为写锁进行懒加载初始化
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+	
+	// Double-check under write lock
+	p, ok = pt.peers[virtualIP]
+	if !ok {
+		return nil
+	}
+	if p.Cipher == nil {
+		p.Cipher = pt.createCipher(p.PublicKey)
+	}
+
+	return &PeerConnection{
+		Hostname:      p.Hostname,
+		VirtualIP:     p.VirtualIP,
+		SignalingAddr: p.SignalingAddr,
+		PublicAddr:    p.PublicAddr,
+		PublicKey:     p.PublicKey,
+		Cipher:        p.Cipher,
+		State:         p.State,
+		LastActive:    p.LastActive,
+	}
 }
 
 func (pt *PeerTable) UpdateState(virtualIP string, state PeerState) {
@@ -131,6 +200,8 @@ func (pt *PeerTable) GetAllPeers() []*PeerConnection {
 			VirtualIP:     p.VirtualIP,
 			SignalingAddr: p.SignalingAddr,
 			PublicAddr:    p.PublicAddr,
+			PublicKey:     p.PublicKey,
+			Cipher:        p.Cipher,
 			State:         p.State,
 			LastActive:    p.LastActive,
 		})
