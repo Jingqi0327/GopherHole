@@ -117,6 +117,14 @@ func (pt *PeerTable) SyncPeers(onlinePeers []*pb.RemotePeer) {
 			}
 		}
 	}
+
+	// Update local hosts file with the latest peer list
+	var allPeers []*PeerConnection
+	for _, p := range pt.peers {
+		allPeers = append(allPeers, p)
+	}
+	// Run asynchronously to avoid blocking the signaling loop
+	go UpdateHostsFile(allPeers)
 }
 
 func (pt *PeerTable) GetPeer(virtualIP string) *PeerConnection {
