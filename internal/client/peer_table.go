@@ -186,6 +186,16 @@ func (pt *PeerTable) UpdateState(virtualIP string, state PeerState) {
 	}
 }
 
+// ResetAllConnections 将所有节点的连接状态重置为断开
+// 用于当本地公网端点改变时，强制与所有节点重新打洞
+func (pt *PeerTable) ResetAllConnections() {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+	for _, p := range pt.peers {
+		p.State = StateDisconnected
+	}
+}
+
 // UpdateAddr updates the UDP address learned from actual UDP packets (NAT behavior)
 func (pt *PeerTable) UpdateAddr(virtualIP string, addr *net.UDPAddr) {
 	pt.mu.Lock()

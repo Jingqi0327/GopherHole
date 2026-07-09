@@ -162,8 +162,20 @@ func (e *UDPEngine) readLoop() {
 		}
 
 		// STUN 协议的固定特征：第 4-7 字节是 Magic Cookie (0x2112A442)
-		// 我们盲发保活请求后，STUN 服务器发回的响应会被这里捕获。直接静默丢弃即可。
-		if n >= 20 && binary.BigEndian.Uint32(buf[4:8]) == 0x2112A442 {
+		// 解析 STUN 响应，如果公网端点发生变化则更新本地状态
+		// 心跳协程会在下一个心跳周期内将新的端点同步给 Signaling Server
+		if n >= 20 && binary.BigEndian.Uint16(buf[0:2]) == 0x0101 && binary.BigEndian.Uint32(buf[4:8]) == 0x2112A442 {
+			ip, port, err := ParseSTUNResponse(buf[:n])
+			if err == nil {
+				if e.publicIP != ip || e.publicPort != port {
+					log.Printf("🌐 NAT Mapping changed! New public endpoint: %s:%d", ip, port)
+					e.publicIP = ip
+					e.publicPort = port
+					if e.peerTable != nil {
+						e.peerTable.ResetAllConnections()
+					}
+				}
+			}
 			continue
 		}
 
