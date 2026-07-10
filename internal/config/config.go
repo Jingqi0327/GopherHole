@@ -18,11 +18,12 @@ type ClientConfig struct {
 
 // ServerConfig 服务端配置
 type ServerConfig struct {
-	BindAddr      string `mapstructure:"BIND_ADDR"`
-	VirtualSubnet string `mapstructure:"VIRTUAL_SUBNET"`
-	Token         string `mapstructure:"TOKEN"`
-	PrivateKey    string `mapstructure:"PRIVATE_KEY"`
-	PublicKey     string `mapstructure:"PUBLIC_KEY"`
+	BindAddr          string `mapstructure:"BIND_ADDR"`
+	VirtualSubnet     string `mapstructure:"VIRTUAL_SUBNET"`
+	Token             string `mapstructure:"TOKEN"`
+	PrivateKey        string `mapstructure:"PRIVATE_KEY"`
+	PublicKey         string `mapstructure:"PUBLIC_KEY"`
+	SecondarySTUNPort int    `mapstructure:"SECONDARY_STUN_PORT"`
 }
 
 // initViper 初始化 viper 的公共逻辑
@@ -75,12 +76,14 @@ func LoadServerConfig() (*ServerConfig, error) {
 	viper.SetDefault("TOKEN", "")
 	viper.SetDefault("PRIVATE_KEY", "")
 	viper.SetDefault("PUBLIC_KEY", "")
+	viper.SetDefault("SECONDARY_STUN_PORT", 0)
 
 	pflag.String("bind_addr", "", "Server listen address")
 	pflag.String("virtual_subnet", "", "Virtual subnet prefix (e.g. 10.8.0)")
 	pflag.String("token", "", "Authentication token")
 	pflag.String("private_key", "", "Server private key (base64 seed)")
 	pflag.String("public_key", "", "Server public key (base64)")
+	pflag.Int("secondary_stun_port", 0, "Secondary UDP port for STUN NAT4 detection (default: basePort + 1)")
 	pflag.Parse()
 
 	_ = viper.BindPFlag("BIND_ADDR", pflag.CommandLine.Lookup("bind_addr"))
@@ -88,6 +91,7 @@ func LoadServerConfig() (*ServerConfig, error) {
 	_ = viper.BindPFlag("TOKEN", pflag.CommandLine.Lookup("token"))
 	_ = viper.BindPFlag("PRIVATE_KEY", pflag.CommandLine.Lookup("private_key"))
 	_ = viper.BindPFlag("PUBLIC_KEY", pflag.CommandLine.Lookup("public_key"))
+	_ = viper.BindPFlag("SECONDARY_STUN_PORT", pflag.CommandLine.Lookup("secondary_stun_port"))
 
 	var cfg ServerConfig
 	if err := viper.Unmarshal(&cfg); err != nil {

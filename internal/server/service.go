@@ -16,14 +16,16 @@ import (
 // SignalingService 实现了 pb.SignalingServiceServer
 type SignalingService struct {
 	pb.UnimplementedSignalingServiceServer
-	ipam    *IPAM
-	manager *PeerManager
+	ipam      *IPAM
+	manager   *PeerManager
+	stunPorts []int32
 }
 
-func NewSignalingService(ipam *IPAM, manager *PeerManager) *SignalingService {
+func NewSignalingService(ipam *IPAM, manager *PeerManager, stunPorts []int32) *SignalingService {
 	return &SignalingService{
-		ipam:    ipam,
-		manager: manager,
+		ipam:      ipam,
+		manager:   manager,
+		stunPorts: stunPorts,
 	}
 }
 
@@ -58,9 +60,9 @@ func (s *SignalingService) Register(ctx context.Context, req *pb.RegisterRequest
 	log.Printf("Node registered: %s (Public IP: %s), Assigned VirtualIP: %s", hostname, publicIP, virtualIP)
 
 	return &pb.RegisterResponse{
-		Hostname:  hostname,
-		VirtualIp: virtualIP,
-		PublicIp:  publicIP,
+		Hostname:   hostname,
+		VirtualIp:  virtualIP,
+		StunPorts:  s.stunPorts,
 	}, nil
 }
 

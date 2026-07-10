@@ -26,10 +26,8 @@ message RegisterRequest {
 
 message RegisterResponse {
   string hostname = 1;
-  // Server 分配给 Client 的虚拟 IP (例如: "10.8.0.2")
   string virtual_ip = 2;
-  // 客户端在公网侧的出口 IP（用于辅助 NAT 探测）
-  string public_ip = 3;
+  repeated int32 stun_ports = 3;
 }
 
 message HeartbeatRequest {
