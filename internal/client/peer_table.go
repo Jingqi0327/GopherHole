@@ -117,6 +117,14 @@ func (pt *PeerTable) SyncPeers(onlinePeers []*pb.RemotePeer) {
 			}
 		}
 	}
+
+	// Update local hosts file with the latest peer list
+	var allPeers []*PeerConnection
+	for _, p := range pt.peers {
+		allPeers = append(allPeers, p)
+	}
+	// Run asynchronously to avoid blocking the signaling loop
+	go UpdateHostsFile(allPeers)
 }
 
 func (pt *PeerTable) GetPeer(virtualIP string) *PeerConnection {
@@ -175,6 +183,16 @@ func (pt *PeerTable) UpdateState(virtualIP string, state PeerState) {
 	if p, ok := pt.peers[virtualIP]; ok {
 		p.State = state
 		p.LastActive = time.Now()
+	}
+}
+
+// ResetAllConnections 将所有节点的连接状态重置为断开
+// 用于当本地公网端点改变时，强制与所有节点重新打洞
+func (pt *PeerTable) ResetAllConnections() {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+	for _, p := range pt.peers {
+		p.State = StateDisconnected
 	}
 }
 

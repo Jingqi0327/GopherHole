@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"sync"
 	"time"
 
@@ -53,11 +54,17 @@ func (m *PeerManager) AddOrUpdatePeer(hostname, virtualIP, publicIP string, publ
 		return
 	}
 
+	changed := p.PublicIP != publicIP || p.PublicPort != publicPort || !bytes.Equal(p.PublicKey, publicKey)
+
 	p.Hostname = hostname
 	p.PublicIP = publicIP
 	p.PublicPort = publicPort
 	p.PublicKey = publicKey
 	p.LastHeartbeat = time.Now()
+
+	if changed {
+		m.notifyUpdate()
+	}
 }
 
 // RemovePeer 移除节点

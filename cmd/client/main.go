@@ -2,6 +2,9 @@ package main
 
 import (
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/Jingqi0327/GopherHole/internal/client"
 	"github.com/Jingqi0327/GopherHole/internal/config"
@@ -21,6 +24,20 @@ func main() {
 	log.Println("GopherHole Client is starting...")
 
 	node := client.NewNode(cfg)
+
+	// Catch SIGINT and SIGTERM to clean up hosts file
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigs
+		log.Println("\n🛑 Shutting down GopherHole client...")
+		client.CleanHostsFile()
+		os.Exit(0)
+	}()
+
+	// Also clean up if Run() returns normally
+	defer client.CleanHostsFile()
+
 	if err := node.Run(); err != nil {
 		log.Fatalf("Client error: %v", err)
 	}

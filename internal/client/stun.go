@@ -42,9 +42,25 @@ func DiscoverPublicEndpoint(conn *net.UDPConn, stunServer string) (string, int, 
 		return "", 0, fmt.Errorf("response too short")
 	}
 
+	return ParseSTUNResponse(resp[:n])
+}
+
+// ParseSTUNResponse 解析 STUN 响应，提取公网 IP 和端口
+func ParseSTUNResponse(resp []byte) (string, int, error) {
+	n := len(resp)
+	if n < 20 {
+		return "", 0, fmt.Errorf("response too short")
+	}
+
 	// 验证 Message Type: Binding Response (0x0101)
 	if binary.BigEndian.Uint16(resp[0:2]) != 0x0101 {
 		return "", 0, fmt.Errorf("invalid response type")
+	}
+
+	// STUN Magic Cookie
+	magicCookie := binary.BigEndian.Uint32(resp[4:8])
+	if magicCookie != 0x2112A442 {
+		return "", 0, fmt.Errorf("invalid magic cookie")
 	}
 
 	// 解析 Attribute
@@ -72,7 +88,6 @@ func DiscoverPublicEndpoint(conn *net.UDPConn, stunServer string) (string, int, 
 				port := binary.BigEndian.Uint16(resp[offset+2 : offset+4])
 				publicPort = int(port ^ 0x2112)
 				ip := make(net.IP, 4)
-				magicCookie := binary.BigEndian.Uint32(req[4:8])
 				ipData := binary.BigEndian.Uint32(resp[offset+4 : offset+8])
 				binary.BigEndian.PutUint32(ip, ipData^magicCookie)
 				publicIP = ip.String()
