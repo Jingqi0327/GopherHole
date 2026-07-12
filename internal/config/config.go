@@ -14,6 +14,7 @@ type ClientConfig struct {
 	IP           string `mapstructure:"IP"`
 	Token        string `mapstructure:"TOKEN"`
 	ServerPubKey string `mapstructure:"SERVER_PUBLIC_KEY"`
+	KeepaliveInt int    `mapstructure:"KEEPALIVE_INTERVAL"`
 }
 
 // ServerConfig 服务端配置
@@ -45,6 +46,7 @@ func LoadClientConfig() (*ClientConfig, error) {
 	viper.SetDefault("HOSTNAME", "")
 	viper.SetDefault("TOKEN", "")
 	viper.SetDefault("SERVER_PUBLIC_KEY", "")
+	viper.SetDefault("KEEPALIVE_INTERVAL", 15)
 
 	// 为了让命令行参数兼容大小写，我们手动绑定
 	pflag.String("server", "", "Signaling Server address")
@@ -52,6 +54,7 @@ func LoadClientConfig() (*ClientConfig, error) {
 	pflag.String("hostname", "", "Hostname (e.g. Workstation-PC)")
 	pflag.String("token", "", "Authentication token")
 	pflag.String("server_pub_key", "", "Server public key for TLS verification")
+	pflag.Int("keepalive", 15, "NAT Keepalive interval in seconds")
 	pflag.Parse()
 
 	_ = viper.BindPFlag("SERVER", pflag.CommandLine.Lookup("server"))
@@ -59,6 +62,7 @@ func LoadClientConfig() (*ClientConfig, error) {
 	_ = viper.BindPFlag("HOSTNAME", pflag.CommandLine.Lookup("hostname"))
 	_ = viper.BindPFlag("TOKEN", pflag.CommandLine.Lookup("token"))
 	_ = viper.BindPFlag("SERVER_PUBLIC_KEY", pflag.CommandLine.Lookup("server_pub_key"))
+	_ = viper.BindPFlag("KEEPALIVE_INTERVAL", pflag.CommandLine.Lookup("keepalive"))
 
 	var cfg ClientConfig
 	if err := viper.Unmarshal(&cfg); err != nil {
