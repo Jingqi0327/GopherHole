@@ -83,7 +83,7 @@ func (e *UDPEngine) startKeepAlive() {
 		for _, peer := range peers {
 			if peer.State == StateConnected || peer.State == StatePunching {
 				// 复用 PUNCH 信令作为 Keep-Alive
-				e.sendControlMsg(peer.PublicAddr, peer.VirtualIP, fmt.Sprintf("PUNCH:%s", e.virtualIP))
+				e.sendControlPacket(peer.PublicAddr, peer.VirtualIP, fmt.Sprintf("PUNCH:%s", e.virtualIP))
 			}
 		}
 	}
@@ -131,7 +131,7 @@ func (e *UDPEngine) readLoop() {
 
 		plaintext, err := peer.Cipher.Decrypt(ciphertext)
 		if err != nil {
-			terminal.Warning(fmt.Sprintf("⚠️ Failed to decrypt packet from %s: %v", srcIP, err))
+			terminal.Warning(fmt.Sprintf("Failed to decrypt packet from %s: %v", srcIP, err))
 			continue
 		}
 
@@ -141,14 +141,15 @@ func (e *UDPEngine) readLoop() {
 				e.onIPPacket(plaintext)
 			}
 		case packet.TypeControl:
-			e.handlePacket(plaintext, addr)
+			e.handleControlPacket(plaintext, addr)
 		default:
-			terminal.Warning(fmt.Sprintf("⚠️ Unknown packet type received: %d", packetType))
+			terminal.Warning(fmt.Sprintf("Unknown packet type received: %d", packetType))
 		}
 	}
 }
 
-func (e *UDPEngine) handlePacket(data []byte, addr *net.UDPAddr) {
+// handleControlPacket 处理控制包
+func (e *UDPEngine) handleControlPacket(data []byte, addr *net.UDPAddr) {
 	msg := string(data)
 	parts := strings.SplitN(msg, ":", 3) //msg格式 PUNCH:virtualIP、PUNCH_ACK:virtualIP、MSG:virtualIP:text
 	if len(parts) < 2 {
@@ -177,7 +178,7 @@ func (e *UDPEngine) handlePacket(data []byte, addr *net.UDPAddr) {
 				}
 			}
 			// 回复 ACK
-			e.sendControlMsg(addr, fromVirtualIP, fmt.Sprintf("PUNCH_ACK:%s", e.virtualIP))
+			e.sendControlPacket(addr, fromVirtualIP, fmt.Sprintf("PUNCH_ACK:%s", e.virtualIP))
 		}
 	case "PUNCH_ACK":
 		// 收到对方的探测响应
@@ -199,8 +200,8 @@ func (e *UDPEngine) handlePacket(data []byte, addr *net.UDPAddr) {
 	}
 }
 
-// sendControlMsg 发送一个带有 PUNCH、PUNCH_ACK 或 MSG 命令的 UDP 报文
-func (e *UDPEngine) sendControlMsg(addr *net.UDPAddr, destVirtualIP string, msg string) error {
+// sendControlPacket 发送一个带有 PUNCH、PUNCH_ACK 或 MSG 命令的 UDP 报文
+func (e *UDPEngine) sendControlPacket(addr *net.UDPAddr, destVirtualIP string, msg string) error {
 	peer := e.peerTable.GetPeer(destVirtualIP)
 	if peer == nil || peer.Cipher == nil {
 		return fmt.Errorf("peer not found or no cipher")
@@ -233,11 +234,11 @@ func (e *UDPEngine) SendDataPacket(buffer []byte, payloadLen int, addr *net.UDPA
 func (e *UDPEngine) Punch(targetVirtualIP string) {
 	peer := e.peerTable.GetPeer(targetVirtualIP)
 	if peer == nil {
-		terminal.Error(fmt.Sprintf("❌ Target %s not found in peer table", targetVirtualIP))
+		terminal.Error(fmt.Sprintf("Target %s not found in peer table", targetVirtualIP))
 		return
 	}
 
-	terminal.Info(fmt.Sprintf("⏳ Starting hole punch to %s...", targetVirtualIP))
+	terminal.Info(fmt.Sprintf("Starting hole punch to %s...", targetVirtualIP))
 	e.peerTable.UpdateState(targetVirtualIP, StatePunching)
 
 	// 1. 启动一个高频重试协程，快速发送多次探测包（提升穿透成功率，对抗丢包和时序问题）
@@ -247,8 +248,16 @@ func (e *UDPEngine) Punch(targetVirtualIP string) {
 			if p == nil || p.State == StateConnected {
 				return // 如果已经连通，直接停止发送探测
 			}
-			e.sendControlMsg(p.PublicAddr, targetVirtualIP, fmt.Sprintf("PUNCH:%s", e.virtualIP))
+			e.sendControlPacket(p.PublicAddr, targetVirtualIP, fmt.Sprintf("PUNCH:%s", e.virtualIP))
 			time.Sleep(300 * time.Millisecond)
+		}
+
+		// 打不通的话恢复未连接状态
+		p := e.peerTable.GetPeer(targetVirtualIP)
+		if p != nil && p.State == StatePunching {
+			terminal.Warning(fmt.Sprintf("Hole punch to %s timed out.", targetVirtualIP))
+			e.peerTable.UpdateState(targetVirtualIP, StateDisconnected)
+			e.peerTable.FlushPendingPackets(targetVirtualIP)
 		}
 	}()
 
@@ -260,7 +269,7 @@ func (e *UDPEngine) Punch(targetVirtualIP string) {
 	}
 	_, err := e.grpcClient.SignalRoute(context.Background(), req)
 	if err != nil {
-		terminal.Error(fmt.Sprintf("⚠️ Failed to route signal: %v", err))
+		terminal.Error(fmt.Sprintf("Failed to route signal: %v", err))
 	}
 }
 
@@ -270,7 +279,7 @@ func (e *UDPEngine) HandleSignal(sig *pb.SignalMessage) {
 		targetPeer := e.peerTable.GetPeer(sig.FromVirtualIp)
 		if targetPeer != nil {
 			if targetPeer.State == StateDisconnected {
-				terminal.Info(fmt.Sprintf("🔔 Received punch request from %s, assisting...", sig.FromVirtualIp))
+				terminal.Info(fmt.Sprintf("Received punch request from %s, assisting...", sig.FromVirtualIp))
 				e.Punch(sig.FromVirtualIp)
 			}
 		}
@@ -280,9 +289,18 @@ func (e *UDPEngine) HandleSignal(sig *pb.SignalMessage) {
 // SendMessage 发送测试文本消息
 func (e *UDPEngine) SendMessage(targetVirtualIP, text string) {
 	peer := e.peerTable.GetPeer(targetVirtualIP)
-	if peer == nil || peer.State != StateConnected {
-		terminal.Error(fmt.Sprintf("❌ Cannot send message: not connected to %s", targetVirtualIP))
+	if peer == nil {
+		terminal.Error(fmt.Sprintf("Cannot send message: peer %s not found", targetVirtualIP))
 		return
 	}
-	e.sendControlMsg(peer.PublicAddr, targetVirtualIP, fmt.Sprintf("MSG:%s:%s", e.virtualIP, text))
+    // 如果没有连通，顺手帮他触发打洞
+	if peer.State != StateConnected {
+		terminal.Info(fmt.Sprintf("Not connected to %s. Triggering hole punch, please try sending again in a moment...", targetVirtualIP))
+		if peer.State != StatePunching {
+			e.Punch(targetVirtualIP)
+		}
+		return
+	}
+	e.sendControlPacket(peer.PublicAddr, targetVirtualIP, fmt.Sprintf("MSG:%s:%s", e.virtualIP, text))
 }
+
