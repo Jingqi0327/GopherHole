@@ -20,15 +20,21 @@ const (
 	StateConnected
 )
 
+type PendingPacket struct {
+	Buffer     []byte
+	PayloadLen int
+}
+
 type PeerConnection struct {
-	Hostname      string
-	VirtualIP     string
-	SignalingAddr *net.UDPAddr // Server 下发的参考地址（用于感知节点重启或网络切换）
-	PublicAddr    *net.UDPAddr // 实际打通的公网地址（NAT 穿透后的真实端点）
-	PublicKey     []byte       // Client端的公钥,用于p2p隧道的加密
-	Cipher        *crypto.SymmetricCipher
-	State         PeerState
-	LastActive    time.Time
+	Hostname       string
+	VirtualIP      string
+	SignalingAddr  *net.UDPAddr // Server 下发的参考地址（用于感知节点重启或网络切换）
+	PublicAddr     *net.UDPAddr // 实际打通的公网地址（NAT 穿透后的真实端点）
+	PublicKey      []byte       // Client端的公钥,用于p2p隧道的加密
+	Cipher         *crypto.SymmetricCipher
+	State          PeerState
+	LastActive     time.Time
+	PendingPackets []PendingPacket // 用于暂存打洞期间的数据包
 }
 
 type PeerTable struct {
@@ -97,9 +103,10 @@ func (pt *PeerTable) SyncPeers(onlinePeers []*pb.RemotePeer) {
 				VirtualIP:     virtualIP,
 				SignalingAddr: sigAddr,
 				PublicAddr:    sigAddr, // 初始时，将信令地址作为预测的打洞地址
-				PublicKey:     p.PublicKey,
-				Cipher:        nil, // 懒加载，在首次通信时通过 GetPeer 触发生成
-				State:         StateDisconnected,
+				PublicKey:      p.PublicKey,
+				Cipher:         nil, // 懒加载，在首次通信时通过 GetPeer 触发生成
+				State:          StateDisconnected,
+				PendingPackets: nil,
 			}
 		} else { // TODO: 重新处理下PeerConnection的逻辑================
 			// 检查公钥是否变更 (意味着对方重启了进程)
@@ -245,4 +252,45 @@ func (pt *PeerTable) ResolveVirtualIP(target string) string {
 		}
 	}
 	return ""
+}
+
+// EnqueuePacket 将打洞期间未能发送的数据包进行深拷贝并暂存
+func (pt *PeerTable) EnqueuePacket(virtualIP string, buffer []byte, payloadLen int) {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+
+	p, ok := pt.peers[virtualIP]
+	if !ok {
+		return
+	}
+
+	// 限制最大积压包数，防止内存泄漏或被恶意流量打爆
+	if len(p.PendingPackets) > 100 {
+		return
+	}
+
+	// 必须做深拷贝，因为上层调用者（Data Pump）会复用 buffer
+	copiedBuf := make([]byte, len(buffer))
+	copy(copiedBuf, buffer)
+
+	p.PendingPackets = append(p.PendingPackets, PendingPacket{
+		Buffer:     copiedBuf,
+		PayloadLen: payloadLen,
+	})
+}
+
+// FlushPendingPackets 获取所有暂存的数据包并清空队列
+func (pt *PeerTable) FlushPendingPackets(virtualIP string) []PendingPacket {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+
+	p, ok := pt.peers[virtualIP]
+	if !ok || len(p.PendingPackets) == 0 {
+		return nil
+	}
+
+	packets := p.PendingPackets
+	p.PendingPackets = nil // 清空队列
+
+	return packets
 }

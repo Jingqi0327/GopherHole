@@ -169,7 +169,12 @@ func (e *UDPEngine) handlePacket(data []byte, addr *net.UDPAddr) {
 			if peer.State != StateConnected {
 				e.peerTable.UpdateState(fromVirtualIP, StateConnected)
 				terminal.Success(fmt.Sprintf("[Hole Punched] %s <-> %s", e.virtualIP, fromVirtualIP))
-				// TODO: 在这里触发 Pending Queue，将之前处于 Punching 状态时积压的数据包一并发送
+				
+				// 取出并发送由于尚未连通而积压在队列中的数据包 (例如 TCP SYN 首包)
+				pending := e.peerTable.FlushPendingPackets(fromVirtualIP)
+				for _, pkt := range pending {
+					e.SendDataPacket(pkt.Buffer, pkt.PayloadLen, addr, fromVirtualIP)
+				}
 			}
 			// 回复 ACK
 			e.sendControlMsg(addr, fromVirtualIP, fmt.Sprintf("PUNCH_ACK:%s", e.virtualIP))
@@ -180,7 +185,12 @@ func (e *UDPEngine) handlePacket(data []byte, addr *net.UDPAddr) {
 		if peer != nil && peer.State != StateConnected {
 			e.peerTable.UpdateState(fromVirtualIP, StateConnected)
 			terminal.Success(fmt.Sprintf("[Hole Punched] %s <-> %s", e.virtualIP, fromVirtualIP))
-			// TODO: 在这里触发 Pending Queue，将之前处于 Punching 状态时积压的数据包一并发送
+
+			// 取出并发送由于尚未连通而积压在队列中的数据包 (例如 TCP SYN 首包)
+			pending := e.peerTable.FlushPendingPackets(fromVirtualIP)
+			for _, pkt := range pending {
+				e.SendDataPacket(pkt.Buffer, pkt.PayloadLen, addr, fromVirtualIP)
+			}
 		}
 	case "MSG":
 		if len(parts) == 3 {
