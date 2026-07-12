@@ -174,14 +174,14 @@ func (node *Node) startDataPumpOutbound() {
 			// 查找对方节点
 			peer := node.peerTable.GetPeer(destVitrualIP)
 			if peer != nil {
-				if peer.State == StateConnected {
+				if peer.GetState() == StateConnected {
 					// 已连通，直接通过 UDP 发送零拷贝封装的 IP 数据包
-					node.udpEngine.SendDataPacket(buf[:Headroom+n], n, peer.PublicAddr, destVitrualIP)
+					node.udpEngine.SendDataPacket(buf[:Headroom+n], n, peer.GetObservedAddr(), destVitrualIP)
 				} else {
 					// 未连通（StateDisconnected 或 StatePunching），暂存数据包以防丢失首包
 					node.peerTable.EnqueuePacket(destVitrualIP, buf[:Headroom+n], n)
 					
-					if peer.State != StatePunching {
+					if peer.GetState() != StatePunching {
 						// 发现发往该 IP 的流量，但尚未连通，触发打洞
 						terminal.Info(fmt.Sprintf("Traffic detected for %s, but not connected. Triggering hole punch...", destVitrualIP))
 						node.udpEngine.Punch(destVitrualIP)

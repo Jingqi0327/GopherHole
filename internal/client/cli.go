@@ -57,7 +57,7 @@ func (node *Node) handleTerminalInput() {
 				info := peerDisplayInfo{
 					Hostname:   p.Hostname,
 					VirtualIP:  p.VirtualIP,
-					PublicAddr: p.PublicAddr.String(),
+					PublicAddr: p.ObservedAddr.String(),
 				}
 				if p.VirtualIP == node.virtualIP {
 					info.StateMsg = fmt.Sprintf("%s<This Node>%s", terminal.ColorCyan, terminal.ColorReset)

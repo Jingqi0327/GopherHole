@@ -28,7 +28,7 @@ func UpdateHostsFile(hostMap map[string]string) {
 	hostsPath := getHostsFilePath()
 	content, err := os.ReadFile(hostsPath)
 	if err != nil {
-		log.Printf("⚠️ Failed to read %s: %v", hostsPath, err)
+		log.Printf("Failed to read %s: %v", hostsPath, err)
 		return
 	}
 
@@ -77,9 +77,9 @@ func UpdateHostsFile(hostMap map[string]string) {
 	// Write back to the file
 	err = os.WriteFile(hostsPath, newContent.Bytes(), 0644)
 	if err != nil {
-		log.Printf("⚠️ Failed to write to %s: %v. Please ensure you are running as Administrator/root.", hostsPath, err)
+		log.Printf("Failed to write to %s: %v. Please ensure you are running as Administrator/root.", hostsPath, err)
 	} else {
-		log.Printf("✅ Local hosts file updated successfully.")
+		log.Printf("Local hosts file updated successfully.")
 	}
 }
 

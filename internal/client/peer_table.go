@@ -25,48 +25,47 @@ type PendingPacket struct {
 	PayloadLen int
 }
 
-type PeerConnection struct {
-	Hostname       string
-	VirtualIP      string
-	SignalingAddr  *net.UDPAddr // Server 下发的参考地址（用于感知节点重启或网络切换）
-	PublicAddr     *net.UDPAddr // 实际打通的公网地址（NAT 穿透后的真实端点）
+type PeerEntry struct {
+	mu             sync.RWMutex
+	Hostname       string       // 对端hostname
+	VirtualIP      string       // 对端虚拟IP
+	ReportedAddr   *net.UDPAddr // Server 下发的参考地址
+	ObservedAddr   *net.UDPAddr // 实际打通的公网地址
 	PublicKey      []byte       // Client端的公钥,用于p2p隧道的加密
 	Cipher         *crypto.SymmetricCipher
-	State          PeerState
-	LastActive     time.Time
+	CipherFailed   bool            // 标记Cipher是否初始化失败过
+	State          PeerState       // 和对端的状态
+	LastActive     time.Time       // 上次活跃时间
 	PendingPackets []PendingPacket // 用于暂存打洞期间的数据包
+}
+
+func (p *PeerEntry) GetCipher() *crypto.SymmetricCipher {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.Cipher
+}
+
+func (p *PeerEntry) GetObservedAddr() *net.UDPAddr {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.ObservedAddr
+}
+
+func (p *PeerEntry) GetState() PeerState {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.State
 }
 
 type PeerTable struct {
 	mu         sync.RWMutex
-	peers      map[string]*PeerConnection
+	peers      map[string]*PeerEntry
 	privateKey [32]byte
-}
-
-func (pt *PeerTable) createCipher(peerPubKey []byte) *crypto.SymmetricCipher {
-	if len(peerPubKey) != 32 {
-		return nil
-	}
-	var pubKey32 [32]byte
-	copy(pubKey32[:], peerPubKey)
-	
-	sharedSecret, err := crypto.ComputeSharedSecret(pt.privateKey, pubKey32)
-	if err != nil {
-		log.Printf("⚠️ Failed to compute shared secret: %v", err)
-		return nil
-	}
-	sessionKey := crypto.DeriveSessionKey(sharedSecret)
-	cipher, err := crypto.NewSymmetricCipher(sessionKey)
-	if err != nil {
-		log.Printf("⚠️ Failed to create symmetric cipher: %v", err)
-		return nil
-	}
-	return cipher
 }
 
 func NewPeerTable(privateKey [32]byte) *PeerTable {
 	return &PeerTable{
-		peers:      make(map[string]*PeerConnection),
+		peers:      make(map[string]*PeerEntry),
 		privateKey: privateKey,
 	}
 }
@@ -98,146 +97,165 @@ func (pt *PeerTable) SyncPeers(onlinePeers []*pb.RemotePeer) {
 		existing, ok := pt.peers[virtualIP]
 		if !ok {
 			// 新上线的节点
-			pt.peers[virtualIP] = &PeerConnection{
-				Hostname:      p.Hostname,
-				VirtualIP:     virtualIP,
-				SignalingAddr: sigAddr,
-				PublicAddr:    sigAddr, // 初始时，将信令地址作为预测的打洞地址
+			pt.peers[virtualIP] = &PeerEntry{
+				Hostname:       p.Hostname,
+				VirtualIP:      virtualIP,
+				ReportedAddr:   sigAddr,
+				ObservedAddr:   sigAddr, // 初始时，将信令地址作为预测的打洞地址
 				PublicKey:      p.PublicKey,
 				Cipher:         nil, // 懒加载，在首次通信时通过 GetPeer 触发生成
 				State:          StateDisconnected,
 				PendingPackets: nil,
 			}
-		} else { // TODO: 重新处理下PeerConnection的逻辑================
-			// 检查公钥是否变更 (意味着对方重启了进程)
-			if !bytes.Equal(existing.PublicKey, p.PublicKey) {
+		} else { // 整理并重构 PeerEntry 的更新逻辑
+			existing.mu.Lock()
+			existing.Hostname = p.Hostname
+
+			pubKeyChanged := !bytes.Equal(existing.PublicKey, p.PublicKey)
+			addrChanged := existing.ReportedAddr.String() != sigAddr.String()
+
+			if pubKeyChanged || addrChanged {
 				existing.PublicKey = p.PublicKey
-				existing.Cipher = nil // 懒加载
+				existing.ReportedAddr = sigAddr
+				existing.ObservedAddr = sigAddr
+				if pubKeyChanged {
+					existing.Cipher = nil
+					existing.CipherFailed = false
+				}
 				existing.State = StateDisconnected
+				existing.PendingPackets = nil
 			}
-			// 节点仍在运行，但如果信令服务器下发的端点发生了变化（IP变了或者绑定的本地UDP端口变了）
-			// 这意味着对方客户端重启了，或者网络环境切换了。之前的打洞状态完全失效！
-			if existing.SignalingAddr.String() != sigAddr.String() {
-				existing.Hostname = p.Hostname
-				existing.SignalingAddr = sigAddr
-				existing.PublicAddr = sigAddr // 重置预测地址
-				existing.State = StateDisconnected
-			}
+			existing.mu.Unlock()
 		}
 	}
 
-	// Update local hosts file with the latest peer list
+	// 更新本地 hosts 文件
 	hostMap := make(map[string]string)
 	for _, p := range pt.peers {
 		hostMap[p.Hostname] = p.VirtualIP
 	}
-	// Run asynchronously to avoid blocking the signaling loop
+	// 异步更新防止阻塞
 	go utils.UpdateHostsFile(hostMap)
 }
 
-func (pt *PeerTable) GetPeer(virtualIP string) *PeerConnection {
-	pt.mu.RLock()
-	p, ok := pt.peers[virtualIP]
-	if !ok {
-		pt.mu.RUnlock()
+func (pt *PeerTable) createCipher(peerPubKey []byte) *crypto.SymmetricCipher {
+	if len(peerPubKey) != 32 {
 		return nil
 	}
-	
-	// 如果 Cipher 已经就绪，直接拷贝返回
-	if p.Cipher != nil {
-		copyPeer := &PeerConnection{
-			Hostname:      p.Hostname,
-			VirtualIP:     p.VirtualIP,
-			SignalingAddr: p.SignalingAddr,
-			PublicAddr:    p.PublicAddr,
-			PublicKey:     p.PublicKey,
-			Cipher:        p.Cipher,
-			State:         p.State,
-			LastActive:    p.LastActive,
-		}
-		pt.mu.RUnlock()
-		return copyPeer
-	}
-	pt.mu.RUnlock()
+	var pubKey32 [32]byte
+	copy(pubKey32[:], peerPubKey)
 
-	// Cipher 为空，升级为写锁进行懒加载初始化
-	pt.mu.Lock()
-	defer pt.mu.Unlock()
-	
-	// Double-check under write lock
-	p, ok = pt.peers[virtualIP]
-	if !ok {
+	sharedSecret, err := crypto.ComputeSharedSecret(pt.privateKey, pubKey32)
+	if err != nil {
+		log.Printf("Failed to compute shared secret: %v", err)
 		return nil
 	}
-	if p.Cipher == nil {
-		p.Cipher = pt.createCipher(p.PublicKey)
+	sessionKey := crypto.DeriveSessionKey(sharedSecret)
+	cipher, err := crypto.NewSymmetricCipher(sessionKey)
+	if err != nil {
+		log.Printf("Failed to create symmetric cipher: %v", err)
+		return nil
 	}
-
-	return &PeerConnection{
-		Hostname:      p.Hostname,
-		VirtualIP:     p.VirtualIP,
-		SignalingAddr: p.SignalingAddr,
-		PublicAddr:    p.PublicAddr,
-		PublicKey:     p.PublicKey,
-		Cipher:        p.Cipher,
-		State:         p.State,
-		LastActive:    p.LastActive,
-	}
+	return cipher
 }
 
+func (pt *PeerTable) GetPeer(virtualIP string) *PeerEntry {
+	pt.mu.RLock()
+	p, ok := pt.peers[virtualIP]
+	pt.mu.RUnlock()
+
+	if !ok {
+		return nil
+	}
+
+	p.mu.RLock()
+	cipherReady := p.Cipher != nil
+	cipherFailed := p.CipherFailed
+	pubKey := p.PublicKey
+	p.mu.RUnlock()
+
+	// 并发安全的懒加载，计算过程不持有任何锁
+	if !cipherReady && !cipherFailed {
+		cipher := pt.createCipher(pubKey)
+		
+		p.mu.Lock()
+		// Double check
+		if p.Cipher == nil && !p.CipherFailed {
+			if cipher != nil {
+				p.Cipher = cipher
+			} else {
+				p.CipherFailed = true // 防止非法公钥导致无限重试
+			}
+		}
+		p.mu.Unlock()
+	}
+
+	return p
+}
+
+// UpdateState 更新对端的连接状态
 func (pt *PeerTable) UpdateState(virtualIP string, state PeerState) {
-	pt.mu.Lock()
-	defer pt.mu.Unlock()
-	if p, ok := pt.peers[virtualIP]; ok {
+	pt.mu.RLock()
+	p, ok := pt.peers[virtualIP]
+	pt.mu.RUnlock()
+	
+	if ok {
+		p.mu.Lock()
 		p.State = state
 		p.LastActive = time.Now()
+		p.mu.Unlock()
 	}
 }
 
 // ResetAllConnections 将所有节点的连接状态重置为断开
-// 用于当本地公网端点改变时，强制与所有节点重新打洞
 func (pt *PeerTable) ResetAllConnections() {
-	pt.mu.Lock()
-	defer pt.mu.Unlock()
+	pt.mu.RLock()
+	defer pt.mu.RUnlock()
 	for _, p := range pt.peers {
+		p.mu.Lock()
 		p.State = StateDisconnected
+		p.mu.Unlock()
 	}
 }
 
-// UpdateAddr updates the UDP address learned from actual UDP packets (NAT behavior)
+// UpdateAddr 更新对端的公网端点
 func (pt *PeerTable) UpdateAddr(virtualIP string, addr *net.UDPAddr) {
-	pt.mu.Lock()
-	defer pt.mu.Unlock()
-	if p, ok := pt.peers[virtualIP]; ok {
-		p.PublicAddr = addr
+	pt.mu.RLock()
+	p, ok := pt.peers[virtualIP]
+	pt.mu.RUnlock()
+	
+	if ok {
+		p.mu.Lock()
+		p.ObservedAddr = addr
 		p.LastActive = time.Now()
+		p.mu.Unlock()
 	}
 }
 
 // GetAllPeers 返回当前 PeerTable 的所有节点快照
-func (pt *PeerTable) GetAllPeers() []*PeerConnection {
+func (pt *PeerTable) GetAllPeers() []*PeerEntry {
 	pt.mu.RLock()
 	defer pt.mu.RUnlock()
 
-	peers := make([]*PeerConnection, 0, len(pt.peers))
+	peers := make([]*PeerEntry, 0, len(pt.peers))
 	for _, p := range pt.peers {
-		peers = append(peers, &PeerConnection{
-			Hostname:      p.Hostname,
-			VirtualIP:     p.VirtualIP,
-			SignalingAddr: p.SignalingAddr,
-			PublicAddr:    p.PublicAddr,
-			PublicKey:     p.PublicKey,
-			Cipher:        p.Cipher,
-			State:         p.State,
-			LastActive:    p.LastActive,
+		p.mu.RLock()
+		peers = append(peers, &PeerEntry{
+			Hostname:     p.Hostname,
+			VirtualIP:    p.VirtualIP,
+			ReportedAddr: p.ReportedAddr,
+			ObservedAddr: p.ObservedAddr,
+			PublicKey:    p.PublicKey,
+			Cipher:       p.Cipher,
+			State:        p.State,
+			LastActive:   p.LastActive,
 		})
+		p.mu.RUnlock()
 	}
 	return peers
 }
 
-// ResolveVirtualIP tries to find the VirtualIP by the given target string.
-// If target is already a VirtualIP in the table, it returns it.
-// If target matches a Hostname in the table, it returns the corresponding VirtualIP.
+// ResolveVirtualIP 根据目标主机名或虚拟IP，返回对应的虚拟IP
 func (pt *PeerTable) ResolveVirtualIP(target string) string {
 	pt.mu.RLock()
 	defer pt.mu.RUnlock()
@@ -247,7 +265,11 @@ func (pt *PeerTable) ResolveVirtualIP(target string) string {
 	}
 
 	for virtualIP, p := range pt.peers {
-		if p.Hostname == target {
+		p.mu.RLock()
+		hostname := p.Hostname
+		p.mu.RUnlock()
+		
+		if hostname == target {
 			return virtualIP
 		}
 	}
@@ -256,13 +278,16 @@ func (pt *PeerTable) ResolveVirtualIP(target string) string {
 
 // EnqueuePacket 将打洞期间未能发送的数据包进行深拷贝并暂存
 func (pt *PeerTable) EnqueuePacket(virtualIP string, buffer []byte, payloadLen int) {
-	pt.mu.Lock()
-	defer pt.mu.Unlock()
-
+	pt.mu.RLock()
 	p, ok := pt.peers[virtualIP]
+	pt.mu.RUnlock()
+
 	if !ok {
 		return
 	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
 	// 限制最大积压包数，防止内存泄漏或被恶意流量打爆
 	if len(p.PendingPackets) > 100 {
@@ -281,11 +306,18 @@ func (pt *PeerTable) EnqueuePacket(virtualIP string, buffer []byte, payloadLen i
 
 // FlushPendingPackets 获取所有暂存的数据包并清空队列
 func (pt *PeerTable) FlushPendingPackets(virtualIP string) []PendingPacket {
-	pt.mu.Lock()
-	defer pt.mu.Unlock()
-
+	pt.mu.RLock()
 	p, ok := pt.peers[virtualIP]
-	if !ok || len(p.PendingPackets) == 0 {
+	pt.mu.RUnlock()
+
+	if !ok {
+		return nil
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if len(p.PendingPackets) == 0 {
 		return nil
 	}
 
