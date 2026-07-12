@@ -90,6 +90,24 @@ func (c *SymmetricCipher) Encrypt(plaintext []byte) []byte {
 	return out
 }
 
+// EncryptInPlace 针对 GopherHole 私有报文优化的原地加密方法。
+// buffer 必须包含完整的 Headroom（至少13字节，前5字节为协议头留空，5-13为Nonce预留）和后续的明文。
+// plaintextLen 为明文长度。该方法将加密后的数据及 16 字节 MAC 标签原地覆盖，并返回最终发送的切片。
+func (c *SymmetricCipher) EncryptInPlace(buffer []byte, plaintextLen int) []byte {
+	nonceVal := c.txNonce.Add(1)
+
+	// 1. 将 8 字节 Nonce 写入协议头的指定位置 [5:13]
+	binary.LittleEndian.PutUint64(buffer[5:13], nonceVal)
+
+	// 2. 构造 AEAD 所需的 12 字节 Nonce（栈分配，0 alloc）
+	var nonce12 [12]byte
+	binary.LittleEndian.PutUint64(nonce12[:8], nonceVal)
+
+	// 3. 原地加密：以 buffer[:13] (已填入 Header 和 Nonce) 为底，将后续明文加密并覆盖写入。
+	// Go 的 crypto/cipher 库能够安全处理 dst 与 plaintext 在同一底层数组的情况。
+	return c.aead.Seal(buffer[:13], nonce12[:], buffer[13:13+plaintextLen], nil)
+}
+
 // Decrypt 检查重放攻击、剥离 Nonce 并解密密文，返回真实载荷。
 func (c *SymmetricCipher) Decrypt(data []byte) ([]byte, error) {
 	if len(data) < 8+c.aead.Overhead() {

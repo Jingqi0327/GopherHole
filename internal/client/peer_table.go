@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Jingqi0327/GopherHole/pkg/crypto"
+	"github.com/Jingqi0327/GopherHole/pkg/utils"
 	"github.com/Jingqi0327/GopherHole/proto/pb"
 )
 
@@ -119,12 +120,12 @@ func (pt *PeerTable) SyncPeers(onlinePeers []*pb.RemotePeer) {
 	}
 
 	// Update local hosts file with the latest peer list
-	var allPeers []*PeerConnection
+	hostMap := make(map[string]string)
 	for _, p := range pt.peers {
-		allPeers = append(allPeers, p)
+		hostMap[p.Hostname] = p.VirtualIP
 	}
 	// Run asynchronously to avoid blocking the signaling loop
-	go UpdateHostsFile(allPeers)
+	go utils.UpdateHostsFile(hostMap)
 }
 
 func (pt *PeerTable) GetPeer(virtualIP string) *PeerConnection {
