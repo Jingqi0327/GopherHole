@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"net"
 	"strconv"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"github.com/Jingqi0327/GopherHole/pkg/auth"
 	"github.com/Jingqi0327/GopherHole/pkg/crypto"
 	"github.com/Jingqi0327/GopherHole/pkg/stun"
+	"github.com/Jingqi0327/GopherHole/pkg/terminal"
 	"github.com/Jingqi0327/GopherHole/proto/pb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -21,30 +21,30 @@ import (
 func main() {
 	cfg, err := config.LoadServerConfig()
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		terminal.Fatalf("Failed to load config: %v", err)
 	}
 
 	// 初始化与校验密钥对
 	privB64, _, err := crypto.EnsureServerKeypair(cfg.PrivateKey, cfg.PublicKey)
 	if err != nil {
-		log.Fatalf("Keypair initialization failed: %v", err)
+		terminal.Fatalf("Keypair initialization failed: %v", err)
 	}
 
 	// 动态生成内存 TLS 证书
 	cert, pubB64, err := crypto.GenerateMemTLSCertFromKey(privB64)
 	if err != nil {
-		log.Fatalf("Failed to generate TLS certificate: %v", err)
+		terminal.Fatalf("Failed to generate TLS certificate: %v", err)
 	}
 
-	log.Println("GopherHole Signaling Server is starting...")
-	log.Printf("=====================================================")
-	log.Printf("[CONFIG GUIDE] Please set the following Public Key in Client config (SERVER_PUBLIC_KEY):")
-	log.Printf("%s", pubB64)
-	log.Printf("=====================================================")
+	terminal.Info("GopherHole Signaling Server is starting...")
+	terminal.Info("=====================================================")
+	terminal.Warning("[CONFIG GUIDE] Please set the following Public Key in Client config (SERVER_PUBLIC_KEY):")
+	terminal.Success(pubB64)
+	terminal.Info("=====================================================")
 
-	ipam := server.NewIPAM(cfg.VirtualSubnet)
+	registry := server.NewRegistry(cfg.VirtualSubnet)
 	manager := server.NewPeerManager(func(virtualIP string) {
-		ipam.Release(virtualIP)
+		registry.Release(virtualIP)
 	})
 
 	// 开启后台巡检 Goroutine，定期清理超时的离线节点 (超时时间设为 30s)
@@ -58,11 +58,11 @@ func main() {
 	// 提取绑定端口
 	_, portStr, err := net.SplitHostPort(cfg.BindAddr)
 	if err != nil {
-		log.Fatalf("Invalid BindAddr %s: %v", cfg.BindAddr, err)
+		terminal.Fatalf("Invalid BindAddr %s: %v", cfg.BindAddr, err)
 	}
 	basePort, err := strconv.Atoi(portStr)
 	if err != nil {
-		log.Fatalf("Invalid port %s: %v", portStr, err)
+		terminal.Fatalf("Invalid port %s: %v", portStr, err)
 	}
 
 	stunPorts := []int32{int32(basePort)}
@@ -76,12 +76,12 @@ func main() {
 	udpAddr, _ := net.ResolveUDPAddr("udp", addr)
 	conn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
-		log.Fatalf("Failed to listen on secondary STUN port %s: %v", addr, err)
+		terminal.Fatalf("Failed to listen on secondary STUN port %s: %v", addr, err)
 	}
 
 	stunPorts = append(stunPorts, int32(secondaryPort))
 	go func(c *net.UDPConn, p string) {
-		log.Printf("Secondary STUN Responder listening on UDP %s", p)
+		terminal.Infof("Secondary STUN Responder listening on UDP %s", p)
 		buf := make([]byte, 2048)
 		for {
 			n, remoteAddr, err := c.ReadFromUDP(buf)
@@ -98,9 +98,9 @@ func main() {
 		udpAddr, _ := net.ResolveUDPAddr("udp", addr)
 		conn, err := net.ListenUDP("udp", udpAddr)
 		if err != nil {
-			log.Fatalf("Failed to listen on primary UDP port %s: %v", addr, err)
+			terminal.Fatalf("Failed to listen on primary UDP port %s: %v", addr, err)
 		}
-		log.Printf("Primary STUN Responder listening on UDP %s", addr)
+		terminal.Infof("Primary STUN Responder listening on UDP %s", addr)
 		buf := make([]byte, 2048)
 		for {
 			n, remoteAddr, err := conn.ReadFromUDP(buf)
@@ -111,12 +111,12 @@ func main() {
 		}
 	}(basePort)
 
-	svc := server.NewSignalingService(ipam, manager, stunPorts)
+	svc := server.NewSignalingService(registry, manager, stunPorts)
 
 	// 监听 TCP 端口
 	lis, err := net.Listen("tcp", cfg.BindAddr)
 	if err != nil {
-		log.Fatalf("failed to listen on %s: %v", cfg.BindAddr, err)
+		terminal.Fatalf("failed to listen on %s: %v", cfg.BindAddr, err)
 	}
 
 	// 组装 gRPC Options
@@ -125,9 +125,9 @@ func main() {
 	if cfg.Token != "" {
 		opts = append(opts, grpc.UnaryInterceptor(auth.NewAuthUnaryInterceptor(cfg.Token)))
 		opts = append(opts, grpc.StreamInterceptor(auth.NewAuthStreamInterceptor(cfg.Token)))
-		log.Println("Token Authentication: ENABLED")
+		terminal.Success("Token Authentication: ENABLED")
 	} else {
-		log.Println("Token Authentication: DISABLED (No token configured)")
+		terminal.Warning("Token Authentication: DISABLED (No token configured)")
 	}
 
 	grpcServer := grpc.NewServer(opts...)
@@ -135,8 +135,8 @@ func main() {
 
 	reflection.Register(grpcServer)
 
-	log.Printf("Signaling Server listening on %s (Subnet: %s.x)\n", cfg.BindAddr, cfg.VirtualSubnet)
+	terminal.Successf("Signaling Server listening on %s (Subnet: %s.x)", cfg.BindAddr, cfg.VirtualSubnet)
 	if err := grpcServer.Serve(lis); err != nil {
-		log.Fatalf("failed to serve: %v", err)
+		terminal.Fatalf("failed to serve: %v", err)
 	}
 }

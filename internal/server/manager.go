@@ -19,19 +19,19 @@ type Peer struct {
 
 // PeerManager 并发安全的节点管理器
 type PeerManager struct {
-	mu          sync.RWMutex
-	peers       map[string]*Peer
-	subscribers map[chan struct{}]struct{}        // 用于发布节点变动事件
-	signalChans map[string]chan *pb.SignalMessage // 针对每个虚拟IP的信令推送通道
-	onRemove    func(virtualIP string)            // 节点移除时的回调函数
+	mu       sync.RWMutex
+	peers    map[string]*Peer
+	Events   *EventBus
+	Router   *SignalRouter
+	onRemove func(virtualIP string) // 节点移除时的回调函数
 }
 
 func NewPeerManager(onRemove func(virtualIP string)) *PeerManager {
 	return &PeerManager{
-		peers:       make(map[string]*Peer),
-		subscribers: make(map[chan struct{}]struct{}),
-		signalChans: make(map[string]chan *pb.SignalMessage),
-		onRemove:    onRemove,
+		peers:    make(map[string]*Peer),
+		Events:   NewEventBus(),
+		Router:   NewSignalRouter(),
+		onRemove: onRemove,
 	}
 }
 
@@ -50,7 +50,7 @@ func (m *PeerManager) AddOrUpdatePeer(hostname, virtualIP, publicIP string, publ
 			PublicKey:     publicKey,
 			LastHeartbeat: time.Now(),
 		}
-		m.notifyUpdate()
+		m.Events.Notify()
 		return
 	}
 
@@ -63,7 +63,16 @@ func (m *PeerManager) AddOrUpdatePeer(hostname, virtualIP, publicIP string, publ
 	p.LastHeartbeat = time.Now()
 
 	if changed {
-		m.notifyUpdate()
+		m.Events.Notify()
+	}
+}
+
+// removePeerLocked 执行实际的节点清理逻辑，调用方需保证已持有写锁
+func (m *PeerManager) removePeerLocked(virtualIP string) {
+	delete(m.peers, virtualIP)
+	m.Router.Unregister(virtualIP)
+	if m.onRemove != nil {
+		m.onRemove(virtualIP)
 	}
 }
 
@@ -72,15 +81,8 @@ func (m *PeerManager) RemovePeer(virtualIP string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, exists := m.peers[virtualIP]; exists {
-		delete(m.peers, virtualIP)
-		if ch, ok := m.signalChans[virtualIP]; ok {
-			delete(m.signalChans, virtualIP)
-			close(ch)
-		}
-		if m.onRemove != nil {
-			m.onRemove(virtualIP)
-		}
-		m.notifyUpdate()
+		m.removePeerLocked(virtualIP)
+		m.Events.Notify()
 	}
 }
 
@@ -110,68 +112,6 @@ func (m *PeerManager) GetAllPeers() []*pb.RemotePeer {
 	return result
 }
 
-// RegisterSignalChannel 为指定节点注册一个专门的信令接收通道
-func (m *PeerManager) RegisterSignalChannel(virtualIP string) chan *pb.SignalMessage {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	ch := make(chan *pb.SignalMessage, 10)
-	m.signalChans[virtualIP] = ch
-	return ch
-}
-
-// UnregisterSignalChannel 注销信令接收通道
-func (m *PeerManager) UnregisterSignalChannel(virtualIP string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if ch, exists := m.signalChans[virtualIP]; exists {
-		delete(m.signalChans, virtualIP)
-		close(ch)
-	}
-}
-
-// RouteSignal 精准路由信令给目标节点
-func (m *PeerManager) RouteSignal(virtualIP string, msg *pb.SignalMessage) bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	ch, exists := m.signalChans[virtualIP]
-	if !exists {
-		return false
-	}
-	select {
-	case ch <- msg:
-		return true
-	default:
-		// 如果通道满，可能对方堵塞
-		return false
-	}
-}
-
-// Subscribe 订阅节点更新事件
-func (m *PeerManager) Subscribe() chan struct{} {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	ch := make(chan struct{}, 1)
-	m.subscribers[ch] = struct{}{}
-	return ch
-}
-
-// Unsubscribe 取消订阅
-func (m *PeerManager) Unsubscribe(ch chan struct{}) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.subscribers, ch)
-	close(ch)
-}
-
-func (m *PeerManager) notifyUpdate() {
-	for ch := range m.subscribers {
-		select {
-		case ch <- struct{}{}:
-		default: // 管道满了，说明上一次通知还没处理，直接跳过，保证不会阻塞
-		}
-	}
-}
-
 // CleanExpired 清理超时节点
 func (m *PeerManager) CleanExpired(timeout time.Duration) {
 	m.mu.Lock()
@@ -180,18 +120,11 @@ func (m *PeerManager) CleanExpired(timeout time.Duration) {
 	changed := false
 	for virtualIP, p := range m.peers {
 		if now.Sub(p.LastHeartbeat) > timeout {
-			delete(m.peers, virtualIP)
-			if ch, ok := m.signalChans[virtualIP]; ok {
-				delete(m.signalChans, virtualIP)
-				close(ch)
-			}
-			if m.onRemove != nil {
-				m.onRemove(virtualIP)
-			}
+			m.removePeerLocked(virtualIP)
 			changed = true
 		}
 	}
 	if changed {
-		m.notifyUpdate()
+		m.Events.Notify()
 	}
 }
