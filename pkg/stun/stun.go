@@ -8,29 +8,18 @@ import (
 	"time"
 )
 
-// NATDetectionResult 存放 NAT 探测结果
-type NATDetectionResult struct {
-	PublicIP    string
-	PublicPort  int
-	ActiveStun  string
-	Endpoints   map[string]string
-	IsSymmetric bool
-}
-
-// DetectNAT 对指定的多个 STUN 服务器进行探测，返回公网地址信息并判断是否为对称型 NAT
-func DetectNAT(conn *net.UDPConn, stunServers []string) (*NATDetectionResult, error) {
+// DetectNAT 对指定的多个 STUN 服务器进行探测，返回公网地址信息和各个探测点的映射结果
+func DetectNAT(conn *net.UDPConn, stunServers []string) (string, int, map[string]string, error) {
 	var pubIP string
 	var pubPort int
-	var activeStun string
 	endpoints := make(map[string]string)
 
 	for _, server := range stunServers {
 		ip, port, err := DiscoverPublicEndpoint(conn, server)
 		if err == nil {
-			if activeStun == "" {
+			if pubIP == "" {
 				pubIP = ip
 				pubPort = port
-				activeStun = server
 			}
 			endpoint := fmt.Sprintf("%s:%d", ip, port)
 			endpoints[endpoint] = server
@@ -38,18 +27,10 @@ func DetectNAT(conn *net.UDPConn, stunServers []string) (*NATDetectionResult, er
 	}
 
 	if len(endpoints) == 0 {
-		return nil, fmt.Errorf("all STUN servers failed")
+		return "", 0, nil, fmt.Errorf("all STUN servers failed")
 	}
 
-	isSymmetric := len(endpoints) > 1
-
-	return &NATDetectionResult{
-		PublicIP:    pubIP,
-		PublicPort:  pubPort,
-		ActiveStun:  activeStun,
-		Endpoints:   endpoints,
-		IsSymmetric: isSymmetric,
-	}, nil
+	return pubIP, pubPort, endpoints, nil
 }
 
 // DiscoverPublicEndpoint 向指定的 STUN 服务器发送请求，获取自身的公网 IP 和端口
@@ -60,12 +41,7 @@ func DiscoverPublicEndpoint(conn *net.UDPConn, stunServer string) (string, int, 
 		return "", 0, err
 	}
 
-	// 构造 STUN Binding Request (20 字节头部)
-	req := make([]byte, 20)
-	binary.BigEndian.PutUint16(req[0:2], 0x0001)     // Message Type: Binding Request
-	binary.BigEndian.PutUint16(req[2:4], 0x0000)     // Message Length: 0
-	binary.BigEndian.PutUint32(req[4:8], 0x2112A442) // Magic Cookie (固定值)
-	rand.Read(req[8:20])                             // Transaction ID (12字节随机数)
+	req := BuildSTUNRequest()
 
 	// 设置超时，避免因为网络问题永远阻塞
 	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
@@ -91,21 +67,12 @@ func DiscoverPublicEndpoint(conn *net.UDPConn, stunServer string) (string, int, 
 
 // ParseSTUNResponse 解析 STUN 响应，提取公网 IP 和端口
 func ParseSTUNResponse(resp []byte) (string, int, error) {
+	if !IsSTUNResponse(resp) {
+		return "", 0, fmt.Errorf("invalid STUN response format")
+	}
+	
 	n := len(resp)
-	if n < 20 {
-		return "", 0, fmt.Errorf("response too short")
-	}
-
-	// 验证 Message Type: Binding Response (0x0101)
-	if binary.BigEndian.Uint16(resp[0:2]) != 0x0101 {
-		return "", 0, fmt.Errorf("invalid response type")
-	}
-
-	// STUN Magic Cookie
 	magicCookie := binary.BigEndian.Uint32(resp[4:8])
-	if magicCookie != 0x2112A442 {
-		return "", 0, fmt.Errorf("invalid magic cookie")
-	}
 
 	// 解析 Attribute
 	offset := 20
@@ -158,59 +125,79 @@ func ParseSTUNResponse(resp []byte) (string, int, error) {
 // HandleSTUNRequest 解析并响应标准的 STUN Binding Request
 // 这使得 GopherHole Server 可以直接作为 STUN 服务器供客户端探测 NAT 类型
 func HandleSTUNRequest(conn *net.UDPConn, addr *net.UDPAddr, req []byte) {
-// 1. 基本格式校验
-if len(req) < 20 {
-return
-}
+	// 1. 基本格式校验
+	if len(req) < 20 {
+		return
+	}
 
-// 验证 Message Type: Binding Request (0x0001)
-if binary.BigEndian.Uint16(req[0:2]) != 0x0001 {
-return
-}
+	// 验证 Message Type: Binding Request (0x0001)
+	if binary.BigEndian.Uint16(req[0:2]) != 0x0001 {
+		return
+	}
 
-// 验证 Magic Cookie (0x2112A442)
-magicCookie := binary.BigEndian.Uint32(req[4:8])
-if magicCookie != 0x2112A442 {
-return
-}
+	// 验证 Magic Cookie (0x2112A442)
+	magicCookie := binary.BigEndian.Uint32(req[4:8])
+	if magicCookie != 0x2112A442 {
+		return
+	}
 
-// 提取 Transaction ID (12 bytes)
-transactionID := req[8:20]
+	// 提取 Transaction ID (12 bytes)
+	transactionID := req[8:20]
 
-// 仅支持 IPv4 (考虑到 GopherHole 客户端目前只支持 IPv4)
-ip4 := addr.IP.To4()
-if ip4 == nil {
-return
-}
+	// 仅支持 IPv4 (考虑到 GopherHole 客户端目前只支持 IPv4)
+	ip4 := addr.IP.To4()
+	if ip4 == nil {
+		return
+	}
 
-// 2. 构造 STUN Binding Response (0x0101)
-// 头20字节 + XOR-MAPPED-ADDRESS 属性 (4字节头 + 8字节值) = 32字节
-resp := make([]byte, 32)
+	// 2. 构造 STUN Binding Response (0x0101)
+	// 头20字节 + XOR-MAPPED-ADDRESS 属性 (4字节头 + 8字节值) = 32字节
+	resp := make([]byte, 32)
 
-// Message Type: Binding Response (0x0101)
-binary.BigEndian.PutUint16(resp[0:2], 0x0101)
-// Message Length: 属性的总长度 (12 bytes)
-binary.BigEndian.PutUint16(resp[2:4], 12)
-// Magic Cookie
-binary.BigEndian.PutUint32(resp[4:8], magicCookie)
-// Transaction ID
-copy(resp[8:20], transactionID)
+	// Message Type: Binding Response (0x0101)
+	binary.BigEndian.PutUint16(resp[0:2], 0x0101)
+	// Message Length: 属性的总长度 (12 bytes)
+	binary.BigEndian.PutUint16(resp[2:4], 12)
+	// Magic Cookie
+	binary.BigEndian.PutUint32(resp[4:8], magicCookie)
+	// Transaction ID
+	copy(resp[8:20], transactionID)
 
-// 3. 添加 XOR-MAPPED-ADDRESS (0x0020) 属性
-binary.BigEndian.PutUint16(resp[20:22], 0x0020) // Attribute Type: XOR-MAPPED-ADDRESS
-binary.BigEndian.PutUint16(resp[22:24], 8)      // Attribute Length: 8 bytes
-resp[24] = 0x00                                  // Reserved
-resp[25] = 0x01                                  // Family: IPv4
+	// 3. 添加 XOR-MAPPED-ADDRESS (0x0020) 属性
+	binary.BigEndian.PutUint16(resp[20:22], 0x0020) // Attribute Type: XOR-MAPPED-ADDRESS
+	binary.BigEndian.PutUint16(resp[22:24], 8)      // Attribute Length: 8 bytes
+	resp[24] = 0x00                                 // Reserved
+	resp[25] = 0x01                                 // Family: IPv4
 
-// 端口进行 XOR (XOR 魔法常数的高 16 位 0x2112)
-xorPort := uint16(addr.Port) ^ uint16(magicCookie>>16)
-binary.BigEndian.PutUint16(resp[26:28], xorPort)
+	// 端口进行 XOR (XOR 魔法常数的高 16 位 0x2112)
+	xorPort := uint16(addr.Port) ^ uint16(magicCookie>>16)
+	binary.BigEndian.PutUint16(resp[26:28], xorPort)
 
-// IP 进行 XOR (XOR 魔法常数 0x2112A442)
-ipUint32 := binary.BigEndian.Uint32(ip4)
-xorIP := ipUint32 ^ magicCookie
-binary.BigEndian.PutUint32(resp[28:32], xorIP)
+	// IP 进行 XOR (XOR 魔法常数 0x2112A442)
+	ipUint32 := binary.BigEndian.Uint32(ip4)
+	xorIP := ipUint32 ^ magicCookie
+	binary.BigEndian.PutUint32(resp[28:32], xorIP)
 
 // 发送响应
-_, _ = conn.WriteToUDP(resp, addr)
+	_, _ = conn.WriteToUDP(resp, addr)
+}
+
+// BuildSTUNRequest 构造一个基础的 STUN Binding Request 头部
+// 包含 12 字节随机 Transaction ID，既可用于探测，也可用于保活
+func BuildSTUNRequest() []byte {
+	req := make([]byte, 20)
+	binary.BigEndian.PutUint16(req[0:2], 0x0001)     // Message Type: Binding Request
+	binary.BigEndian.PutUint16(req[2:4], 0x0000)     // Message Length: 0
+	binary.BigEndian.PutUint32(req[4:8], 0x2112A442) // Magic Cookie (固定值)
+	rand.Read(req[8:20])                             // Transaction ID (12字节随机数)
+	return req
+}
+
+// IsSTUNResponse 快速判断收到的数据包是否是合法的 STUN Binding Response
+func IsSTUNResponse(buf []byte) bool {
+	if len(buf) < 20 {
+		return false
+	}
+	// Message Type == 0x0101 (Binding Response) 且 Magic Cookie == 0x2112A442
+	return binary.BigEndian.Uint16(buf[0:2]) == 0x0101 && binary.BigEndian.Uint32(buf[4:8]) == 0x2112A442
 }
