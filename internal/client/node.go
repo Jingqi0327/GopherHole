@@ -198,7 +198,7 @@ func (node *Node) registerNode(grpcClient pb.SignalingServiceClient) error {
 		RequestedIp:       node.virtualIP,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	regRsp, err := grpcClient.Register(ctx, regReq)

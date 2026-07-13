@@ -56,7 +56,7 @@ func (s *SignalingService) Register(ctx context.Context, req *pb.RegisterRequest
 	go func(ip string) {
 		time.Sleep(30 * time.Second)
 		if !s.manager.HasPeer(ip) {
-			log.Printf("Recycling ghost IP %s (no heartbeat established within 30s)", ip)
+			log.Printf("Cleaning up potentially orphaned IP %s (no heartbeat established within 30s of registration)", ip)
 			s.registry.Release(ip)
 		}
 	}(virtualIP)

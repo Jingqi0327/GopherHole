@@ -29,7 +29,7 @@ type UDPEngine struct {
 
 func NewUDPEngine(conn *net.UDPConn, virtualIP string, pt *PeerTable, grpcClient pb.SignalingServiceClient, serverAddr string, publicIP string, publicPort int, keepaliveInterval int, onIP func([]byte)) (*UDPEngine, error) {
 	localAddr := conn.LocalAddr().(*net.UDPAddr)
-	terminal.Success(fmt.Sprintf("🚀 UDP Engine started on local port %d", localAddr.Port))
+	terminal.Success(fmt.Sprintf("UDP Engine started on local port %d", localAddr.Port))
 
 	return &UDPEngine{
 		conn:              conn,
@@ -107,7 +107,7 @@ func (e *UDPEngine) readLoop() {
 			ip, port, err := stun.ParseSTUNResponse(buf[:n])
 			if err == nil {
 				if e.publicIP != ip || e.publicPort != port {
-					terminal.Info(fmt.Sprintf("🌐 NAT Mapping changed! New public endpoint: %s:%d", ip, port))
+					terminal.Info(fmt.Sprintf("NAT Mapping changed! New public endpoint: %s:%d", ip, port))
 					e.publicIP = ip
 					e.publicPort = port
 					if e.peerTable != nil {

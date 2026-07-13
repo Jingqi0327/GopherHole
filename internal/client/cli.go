@@ -145,7 +145,6 @@ func (node *Node) printNodeInfo() {
 	fmt.Printf("\n%s--- GopherHole Node Info ---%s\n", terminal.ColorYellow, terminal.ColorReset)
 	fmt.Printf("  %sHostname%s   : %s\n", terminal.ColorCyan, terminal.ColorReset, node.hostname)
 	fmt.Printf("  %sVirtual IP%s : %s\n", terminal.ColorCyan, terminal.ColorReset, node.virtualIP)
-	fmt.Printf("  %sPublic IP%s  : %s\n", terminal.ColorGreen, terminal.ColorReset, node.publicIP)
 	fmt.Printf("%s----------------------------%s\n\n", terminal.ColorYellow, terminal.ColorReset)
 }
 
