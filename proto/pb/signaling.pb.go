@@ -128,7 +128,6 @@ type RegisterResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Hostname      string                 `protobuf:"bytes,1,opt,name=hostname,proto3" json:"hostname,omitempty"`
 	VirtualIp     string                 `protobuf:"bytes,2,opt,name=virtual_ip,json=virtualIp,proto3" json:"virtual_ip,omitempty"`
-	StunPorts     []int32                `protobuf:"varint,3,rep,packed,name=stun_ports,json=stunPorts,proto3" json:"stun_ports,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -175,13 +174,6 @@ func (x *RegisterResponse) GetVirtualIp() string {
 		return x.VirtualIp
 	}
 	return ""
-}
-
-func (x *RegisterResponse) GetStunPorts() []int32 {
-	if x != nil {
-		return x.StunPorts
-	}
-	return nil
 }
 
 type HeartbeatRequest struct {
@@ -587,13 +579,11 @@ const file_signaling_proto_rawDesc = "" +
 	"\x0fsignaling.proto\x12\tsignaling\"c\n" +
 	"\x0fRegisterRequest\x12-\n" +
 	"\x12requested_hostname\x18\x01 \x01(\tR\x11requestedHostname\x12!\n" +
-	"\frequested_ip\x18\x02 \x01(\tR\vrequestedIp\"l\n" +
+	"\frequested_ip\x18\x02 \x01(\tR\vrequestedIp\"M\n" +
 	"\x10RegisterResponse\x12\x1a\n" +
 	"\bhostname\x18\x01 \x01(\tR\bhostname\x12\x1d\n" +
 	"\n" +
-	"virtual_ip\x18\x02 \x01(\tR\tvirtualIp\x12\x1d\n" +
-	"\n" +
-	"stun_ports\x18\x03 \x03(\x05R\tstunPorts\"\x8d\x01\n" +
+	"virtual_ip\x18\x02 \x01(\tR\tvirtualIp\"\x8d\x01\n" +
 	"\x10HeartbeatRequest\x12\x1a\n" +
 	"\bhostname\x18\x01 \x01(\tR\bhostname\x12\x1d\n" +
 	"\n" +

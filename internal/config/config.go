@@ -15,6 +15,7 @@ type ClientConfig struct {
 	Token        string `mapstructure:"TOKEN"`
 	ServerPubKey string `mapstructure:"SERVER_PUBLIC_KEY"`
 	KeepaliveInt int    `mapstructure:"KEEPALIVE_INTERVAL"`
+	StunServers  string `mapstructure:"STUN_SERVERS"`
 }
 
 // ServerConfig 服务端配置
@@ -24,7 +25,6 @@ type ServerConfig struct {
 	Token             string `mapstructure:"TOKEN"`
 	PrivateKey        string `mapstructure:"PRIVATE_KEY"`
 	PublicKey         string `mapstructure:"PUBLIC_KEY"`
-	SecondarySTUNPort int    `mapstructure:"SECONDARY_STUN_PORT"`
 }
 
 // initViper 初始化 viper 的公共逻辑
@@ -47,6 +47,7 @@ func LoadClientConfig() (*ClientConfig, error) {
 	viper.SetDefault("TOKEN", "")
 	viper.SetDefault("SERVER_PUBLIC_KEY", "")
 	viper.SetDefault("KEEPALIVE_INTERVAL", 15)
+	viper.SetDefault("STUN_SERVERS", "")
 
 	// 为了让命令行参数兼容大小写，我们手动绑定
 	pflag.String("server", "", "Signaling Server address")
@@ -55,6 +56,7 @@ func LoadClientConfig() (*ClientConfig, error) {
 	pflag.String("token", "", "Authentication token")
 	pflag.String("server_pub_key", "", "Server public key for TLS verification")
 	pflag.Int("keepalive", 15, "NAT Keepalive interval in seconds")
+	pflag.String("stun_servers", "", "Comma-separated list of external STUN servers")
 	pflag.Parse()
 
 	_ = viper.BindPFlag("SERVER", pflag.CommandLine.Lookup("server"))
@@ -63,6 +65,7 @@ func LoadClientConfig() (*ClientConfig, error) {
 	_ = viper.BindPFlag("TOKEN", pflag.CommandLine.Lookup("token"))
 	_ = viper.BindPFlag("SERVER_PUBLIC_KEY", pflag.CommandLine.Lookup("server_pub_key"))
 	_ = viper.BindPFlag("KEEPALIVE_INTERVAL", pflag.CommandLine.Lookup("keepalive"))
+	_ = viper.BindPFlag("STUN_SERVERS", pflag.CommandLine.Lookup("stun_servers"))
 
 	var cfg ClientConfig
 	if err := viper.Unmarshal(&cfg); err != nil {
@@ -80,14 +83,12 @@ func LoadServerConfig() (*ServerConfig, error) {
 	viper.SetDefault("TOKEN", "")
 	viper.SetDefault("PRIVATE_KEY", "")
 	viper.SetDefault("PUBLIC_KEY", "")
-	viper.SetDefault("SECONDARY_STUN_PORT", 0)
 
 	pflag.String("bind_addr", "", "Server listen address")
 	pflag.String("virtual_subnet", "", "Virtual subnet prefix (e.g. 10.8.0)")
 	pflag.String("token", "", "Authentication token")
 	pflag.String("private_key", "", "Server private key (base64 seed)")
 	pflag.String("public_key", "", "Server public key (base64)")
-	pflag.Int("secondary_stun_port", 0, "Secondary UDP port for STUN NAT4 detection (default: basePort + 1)")
 	pflag.Parse()
 
 	_ = viper.BindPFlag("BIND_ADDR", pflag.CommandLine.Lookup("bind_addr"))
@@ -95,7 +96,6 @@ func LoadServerConfig() (*ServerConfig, error) {
 	_ = viper.BindPFlag("TOKEN", pflag.CommandLine.Lookup("token"))
 	_ = viper.BindPFlag("PRIVATE_KEY", pflag.CommandLine.Lookup("private_key"))
 	_ = viper.BindPFlag("PUBLIC_KEY", pflag.CommandLine.Lookup("public_key"))
-	_ = viper.BindPFlag("SECONDARY_STUN_PORT", pflag.CommandLine.Lookup("secondary_stun_port"))
 
 	var cfg ServerConfig
 	if err := viper.Unmarshal(&cfg); err != nil {

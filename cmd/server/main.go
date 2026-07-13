@@ -65,32 +65,6 @@ func main() {
 		terminal.Fatalf("Invalid port %s: %v", portStr, err)
 	}
 
-	stunPorts := []int32{int32(basePort)}
-
-	secondaryPort := cfg.SecondarySTUNPort
-	if secondaryPort <= 0 {
-		secondaryPort = basePort + 1
-	}
-
-	addr := fmt.Sprintf(":%d", secondaryPort)
-	udpAddr, _ := net.ResolveUDPAddr("udp", addr)
-	conn, err := net.ListenUDP("udp", udpAddr)
-	if err != nil {
-		terminal.Fatalf("Failed to listen on secondary STUN port %s: %v", addr, err)
-	}
-
-	stunPorts = append(stunPorts, int32(secondaryPort))
-	go func(c *net.UDPConn, p string) {
-		terminal.Infof("Secondary STUN Responder listening on UDP %s", p)
-		buf := make([]byte, 2048)
-		for {
-			n, remoteAddr, err := c.ReadFromUDP(buf)
-			if err != nil {
-				continue
-			}
-			stun.HandleSTUNRequest(c, remoteAddr, buf[:n])
-		}
-	}(conn, addr)
 
 	// 启动主端口的 UDP 监听
 	go func(port int) {
@@ -111,7 +85,7 @@ func main() {
 		}
 	}(basePort)
 
-	svc := server.NewSignalingService(registry, manager, stunPorts)
+	svc := server.NewSignalingService(registry, manager)
 
 	// 监听 TCP 端口
 	lis, err := net.Listen("tcp", cfg.BindAddr)

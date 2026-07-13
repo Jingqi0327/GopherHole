@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -40,9 +41,8 @@ type Node struct {
 	peerTable       *PeerTable           // 节点表
 	udpEngine       *UDPEngine           // UDP引擎
 	tunDevice       tun.Tunnel           // TUN虚拟网卡
-	serverStunPorts []int32              // 服务端开放的STUN探测端口列表
-	publicIP        string               // Client端公网IP
-	publicPort      int                  // Client端公网端口
+	publicIP        string               // 从 STUN 探测到的公网 IP
+	publicPort      int                  // 从 STUN 探测到的公网端口
 	natType         NatType              // Client端所在NAT环境的类型
 	privateKey      [32]byte             // Client端私钥
 	publicKey       [32]byte             // Client端公钥
@@ -208,7 +208,6 @@ func (node *Node) registerNode(grpcClient pb.SignalingServiceClient) error {
 
 	node.hostname = regRsp.Hostname
 	node.virtualIP = regRsp.VirtualIp
-	node.serverStunPorts = regRsp.StunPorts
 	return nil
 }
 
@@ -253,19 +252,21 @@ func (node *Node) startUDPEngine(conn *net.UDPConn, grpcClient pb.SignalingServi
 
 // detectNAT 执行 STUN 探测，确定公网端点以及 NAT 类型
 func (node *Node) detectNAT(conn *net.UDPConn) error {
-	if len(node.serverStunPorts) == 0 {
-		return fmt.Errorf("server did not provide any STUN ports")
-	}
-
-	serverHost, _, err := net.SplitHostPort(node.cfg.Server)
-	if err != nil {
-		serverHost = node.cfg.Server // fallback
-	}
-
 	var stunServers []string
-	for _, port := range node.serverStunPorts {
-		stunServers = append(stunServers, fmt.Sprintf("%s:%d", serverHost, port))
+	
+	// 1. 先加入外部 STUN
+	if node.cfg.StunServers != "" {
+		servers := strings.Split(node.cfg.StunServers, ",")
+		for _, s := range servers {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				stunServers = append(stunServers, s)
+			}
+		}
 	}
+	
+	// 2. 再加入自建 Server 的 STUN
+	stunServers = append(stunServers, node.cfg.Server)
 
 	terminal.Info(fmt.Sprintf("Discovering public endpoint via STUN servers: %v...", stunServers))
 

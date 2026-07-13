@@ -18,14 +18,12 @@ type SignalingService struct {
 	pb.UnimplementedSignalingServiceServer
 	registry  *Registry
 	manager   *PeerManager
-	stunPorts []int32
 }
 
-func NewSignalingService(registry *Registry, manager *PeerManager, stunPorts []int32) *SignalingService {
+func NewSignalingService(registry *Registry, manager *PeerManager) *SignalingService {
 	return &SignalingService{
-		registry:  registry,
-		manager:   manager,
-		stunPorts: stunPorts,
+		registry: registry,
+		manager:  manager,
 	}
 }
 
@@ -64,9 +62,8 @@ func (s *SignalingService) Register(ctx context.Context, req *pb.RegisterRequest
 	log.Printf("Node registered: %s (Public IP: %s), Assigned VirtualIP: %s", hostname, publicIP, virtualIP)
 
 	return &pb.RegisterResponse{
-		Hostname:   hostname,
-		VirtualIp:  virtualIP,
-		StunPorts:  s.stunPorts,
+		Hostname:  hostname,
+		VirtualIp: virtualIP,
 	}, nil
 }
 

@@ -27,7 +27,6 @@ message RegisterRequest {
 message RegisterResponse {
   string hostname = 1;
   string virtual_ip = 2;
-  repeated int32 stun_ports = 3;
 }
 
 message HeartbeatRequest {
