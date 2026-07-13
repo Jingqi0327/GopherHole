@@ -1,4 +1,4 @@
-package client
+package utils
 
 import (
 	"bufio"
@@ -22,13 +22,13 @@ func getHostsFilePath() string {
 	return "/etc/hosts"
 }
 
-// UpdateHostsFile reads the hosts file, removes the old GopherHole block if it exists,
-// and appends a new block with the current peers.
-func UpdateHostsFile(peers []*PeerConnection) {
+// UpdateHostsFile 接收一个映射为 hostname->virtualIP 的 map。
+// 读取 hosts 文件，移除旧的 GopherHole 块（如果存在），并追加新的块
+func UpdateHostsFile(hostMap map[string]string) {
 	hostsPath := getHostsFilePath()
 	content, err := os.ReadFile(hostsPath)
 	if err != nil {
-		log.Printf("⚠️ Failed to read %s: %v", hostsPath, err)
+		log.Printf("Failed to read %s: %v", hostsPath, err)
 		return
 	}
 
@@ -60,14 +60,14 @@ func UpdateHostsFile(peers []*PeerConnection) {
 	newContent.WriteString("\n")
 
 	// If we have peers, append the new block
-	if len(peers) > 0 {
+	if len(hostMap) > 0 {
 		newContent.WriteString(hostsBlockStart + "\n")
-		for _, p := range peers {
+		for hostname, virtualIP := range hostMap {
 			// Write both .local and exact hostname
-			lineLocal := fmt.Sprintf("%s\t%s.local\n", p.VirtualIP, strings.ToLower(p.Hostname))
-			lineExact := fmt.Sprintf("%s\t%s\n", p.VirtualIP, p.Hostname)
+			lineLocal := fmt.Sprintf("%s\t%s.local\n", virtualIP, strings.ToLower(hostname))
+			lineExact := fmt.Sprintf("%s\t%s\n", virtualIP, hostname)
 			newContent.WriteString(lineLocal)
-			if strings.ToLower(p.Hostname)+".local" != strings.ToLower(p.Hostname) {
+			if strings.ToLower(hostname)+".local" != strings.ToLower(hostname) {
 				newContent.WriteString(lineExact)
 			}
 		}
@@ -77,13 +77,13 @@ func UpdateHostsFile(peers []*PeerConnection) {
 	// Write back to the file
 	err = os.WriteFile(hostsPath, newContent.Bytes(), 0644)
 	if err != nil {
-		log.Printf("⚠️ Failed to write to %s: %v. Please ensure you are running as Administrator/root.", hostsPath, err)
+		log.Printf("Failed to write to %s: %v. Please ensure you are running as Administrator/root.", hostsPath, err)
 	} else {
-		log.Printf("✅ Local hosts file updated successfully.")
+		log.Printf("Local hosts file updated successfully.")
 	}
 }
 
-// CleanHostsFile removes the GopherHole block from the hosts file.
+// CleanHostsFile 清除 hosts 文件中的 GopherHole 块
 func CleanHostsFile() {
 	UpdateHostsFile(nil)
 }

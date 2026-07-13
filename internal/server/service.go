@@ -16,29 +16,35 @@ import (
 // SignalingService 实现了 pb.SignalingServiceServer
 type SignalingService struct {
 	pb.UnimplementedSignalingServiceServer
-	ipam    *IPAM
-	manager *PeerManager
+	registry  *Registry
+	manager   *PeerManager
+	stunPorts []int32
 }
 
-func NewSignalingService(ipam *IPAM, manager *PeerManager) *SignalingService {
+func NewSignalingService(registry *Registry, manager *PeerManager, stunPorts []int32) *SignalingService {
 	return &SignalingService{
-		ipam:    ipam,
-		manager: manager,
+		registry:  registry,
+		manager:   manager,
+		stunPorts: stunPorts,
 	}
+}
+
+// extractClientIP 从 gRPC context 中提取客户端真实的公网 IP
+func extractClientIP(ctx context.Context) string {
+	if p, ok := peer.FromContext(ctx); ok {
+		if host, _, err := net.SplitHostPort(p.Addr.String()); err == nil {
+			return host
+		}
+		return p.Addr.String()
+	}
+	return ""
 }
 
 // Register 处理节点注册
 func (s *SignalingService) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.RegisterResponse, error) {
-	var publicIP string
-	if p, ok := peer.FromContext(ctx); ok {
-		if host, _, err := net.SplitHostPort(p.Addr.String()); err == nil {
-			publicIP = host
-		} else {
-			publicIP = p.Addr.String()
-		}
-	}
+	publicIP := extractClientIP(ctx)
 
-	hostname, virtualIP, err := s.ipam.Allocate(req.GetRequestedHostname(), req.GetRequestedIp())
+	hostname, virtualIP, err := s.registry.Allocate(req.GetRequestedHostname(), req.GetRequestedIp())
 	if err != nil {
 		if errors.Is(err, ErrIPConflict) {
 			return nil, status.Errorf(codes.AlreadyExists, "IP allocation failed: %v", err)
@@ -50,17 +56,17 @@ func (s *SignalingService) Register(ctx context.Context, req *pb.RegisterRequest
 	go func(ip string) {
 		time.Sleep(30 * time.Second)
 		if !s.manager.HasPeer(ip) {
-			log.Printf("Recycling ghost IP %s (no heartbeat established within 30s)", ip)
-			s.ipam.Release(ip)
+			log.Printf("Cleaning up potentially orphaned IP %s (no heartbeat established within 30s of registration)", ip)
+			s.registry.Release(ip)
 		}
 	}(virtualIP)
 
 	log.Printf("Node registered: %s (Public IP: %s), Assigned VirtualIP: %s", hostname, publicIP, virtualIP)
 
 	return &pb.RegisterResponse{
-		Hostname:  hostname,
-		VirtualIp: virtualIP,
-		PublicIp:  publicIP,
+		Hostname:   hostname,
+		VirtualIp:  virtualIP,
+		StunPorts:  s.stunPorts,
 	}, nil
 }
 
@@ -72,31 +78,23 @@ func (s *SignalingService) Heartbeat(stream pb.SignalingService_HeartbeatServer)
 		return err
 	}
 
-	var publicIP string
-	if p, ok := peer.FromContext(stream.Context()); ok {
-		if host, _, err := net.SplitHostPort(p.Addr.String()); err == nil {
-			publicIP = host
-		} else {
-			publicIP = p.Addr.String()
-		}
-	}
+	publicIP := extractClientIP(stream.Context())
 
 	s.manager.AddOrUpdatePeer(req.GetHostname(), req.GetVirtualIp(), publicIP, req.GetPublicPort(), req.GetPublicKey())
 	log.Printf("Node %s(%s) started heartbeat (Public Port: %d)", req.GetHostname(), req.GetVirtualIp(), req.GetPublicPort())
 
 	// 注册信令通道
-	signalCh := s.manager.RegisterSignalChannel(req.GetVirtualIp())
+	signalCh := s.manager.Router.Register(req.GetVirtualIp())
 
 	// 断开时移除节点
 	defer func() {
 		log.Printf("Node %s(%s) disconnected", req.GetHostname(), req.GetVirtualIp())
-		s.manager.UnregisterSignalChannel(req.GetVirtualIp())
 		s.manager.RemovePeer(req.GetVirtualIp())
 	}()
 
 	// 订阅节点列表变动
-	updateCh := s.manager.Subscribe()
-	defer s.manager.Unsubscribe(updateCh)
+	updateCh := s.manager.Events.Subscribe()
+	defer s.manager.Events.Unsubscribe(updateCh)
 
 	// 连接成功后，立即下发一次当前的完整节点列表
 	initResp := &pb.HeartbeatResponse{
@@ -158,7 +156,7 @@ func (s *SignalingService) Heartbeat(stream pb.SignalingService_HeartbeatServer)
 func (s *SignalingService) SignalRoute(ctx context.Context, req *pb.SignalMessage) (*pb.SignalMessageAck, error) {
 	log.Printf("Routing signal [%v] from %s to %s", req.Type, req.FromVirtualIp, req.ToVirtualIp)
 
-	success := s.manager.RouteSignal(req.ToVirtualIp, req)
+	success := s.manager.Router.Route(req.ToVirtualIp, req)
 	if !success {
 		log.Printf("Failed to route signal to %s (Offline or channel full)", req.ToVirtualIp)
 		return &pb.SignalMessageAck{

@@ -4,16 +4,18 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"log"
 	"net"
 	"os"
-	"strings"
-	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/Jingqi0327/GopherHole/internal/config"
 	"github.com/Jingqi0327/GopherHole/pkg/auth"
 	"github.com/Jingqi0327/GopherHole/pkg/crypto"
+	"github.com/Jingqi0327/GopherHole/pkg/stun"
+	"github.com/Jingqi0327/GopherHole/pkg/terminal"
+
 	"github.com/Jingqi0327/GopherHole/pkg/tun"
 	"github.com/Jingqi0327/GopherHole/proto/pb"
 	"google.golang.org/grpc"
@@ -22,18 +24,32 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// NatType 定义 NAT 类型
+type NatType string
+
+const (
+	NatTypeUnknown NatType = "Unknown"
+	NatTypeEasy    NatType = "EasyNAT" // Cone NAT (NAT 1,2,3)
+	NatTypeHard    NatType = "HardNAT" // Symmetric NAT (NAT 4)
+)
+
 type Node struct {
-	cfg        *config.ClientConfig
-	hostname   string
-	virtualIP  string
-	peerTable  *PeerTable
-	udpEngine  *UDPEngine
-	tunDevice  tun.Tunnel
-	privateKey [32]byte
-	publicKey  [32]byte
+	cfg             *config.ClientConfig // Client端配置文件
+	hostname        string               // Client端主机名
+	virtualIP       string               // Client端虚拟IP
+	peerTable       *PeerTable           // 节点表
+	udpEngine       *UDPEngine           // UDP引擎
+	tunDevice       tun.Tunnel           // TUN虚拟网卡
+	serverStunPorts []int32              // 服务端开放的STUN探测端口列表
+	publicIP        string               // Client端公网IP
+	publicPort      int                  // Client端公网端口
+	natType         NatType              // Client端所在NAT环境的类型
+	privateKey      [32]byte             // Client端私钥
+	publicKey       [32]byte             // Client端公钥
 }
 
-func NewNode(cfg *config.ClientConfig) *Node {
+// NewNode 创建一个新的Node
+func NewNode(cfg *config.ClientConfig) (*Node, error) {
 	hostname := cfg.Hostname
 	if hostname == "" {
 		hostname, _ = os.Hostname()
@@ -41,26 +57,29 @@ func NewNode(cfg *config.ClientConfig) *Node {
 
 	privateKey, pubKey, err := crypto.GenerateCurve25519Keypair()
 	if err != nil {
-		log.Fatalf("Failed to generate Curve25519 keypair: %v", err)
+		return nil, fmt.Errorf("failed to generate Curve25519 keypair: %w", err)
 	}
 
-	return &Node{
+	node := &Node{
 		cfg:        cfg,
 		hostname:   hostname,
 		virtualIP:  cfg.IP,
 		peerTable:  NewPeerTable(privateKey),
+		natType:    NatTypeUnknown,
 		privateKey: privateKey,
 		publicKey:  pubKey,
 	}
+	return node, nil
 }
 
-func (a *Node) Run() error {
-	stopAnim := startAnimation(fmt.Sprintf("🔄 Connecting to Signaling Server at %s", a.cfg.Server))
+// Run 运行Node
+func (node *Node) Run() error {
+	stopAnim := terminal.StartSpinner(fmt.Sprintf("%sConnecting to Signaling Server at %s%s", terminal.ColorCyan, node.cfg.Server, terminal.ColorReset))
 
-	opts := a.initgRPCopts()
+	opts := node.initgRPCOpts()
 
 	// 连接 Server
-	conn, err := grpc.NewClient(a.cfg.Server, opts...)
+	conn, err := grpc.NewClient(node.cfg.Server, opts...)
 	if err != nil {
 		stopAnim(true)
 		return fmt.Errorf("failed to connect to server: %w", err)
@@ -70,132 +89,213 @@ func (a *Node) Run() error {
 	grpcClient := pb.NewSignalingServiceClient(conn)
 
 	// 第一步：注册节点并获取 Virtual IP
-	if err := a.registerNode(grpcClient, stopAnim); err != nil {
-		stopAnim(true)
-		return err
+	err = node.registerNode(grpcClient)
+	stopAnim(true)
+	if err != nil {
+		if status.Code(err) == codes.Unauthenticated {
+			return fmt.Errorf("authentication failed (invalid token): %w", err)
+		}
+		return fmt.Errorf("registration failed: %w", err)
 	}
+	terminal.Success("Registration successful!")
+	node.printNodeInfo()
 
 	// 第二步：初始化 TUN 虚拟网卡
-	if err := a.initTunDevice(); err != nil {
+	if err := node.initTunDevice(); err != nil {
+		return err
+	}
+	defer node.tunDevice.Close()
+
+	// 第三步：初始化网络 Socket 并探测 NAT 环境
+	addr, err := net.ResolveUDPAddr("udp", ":0")
+	if err != nil {
+		return fmt.Errorf("failed to resolve UDP address: %w", err)
+	}
+	connUDP, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		return fmt.Errorf("failed to listen on UDP: %w", err)
+	}
+	defer connUDP.Close()
+
+	if err := node.detectNAT(connUDP); err != nil {
+		return fmt.Errorf("NAT detection failed: %w", err)
+	}
+
+	// 第四步：启动 UDP 引擎
+	if err := node.startUDPEngine(connUDP, grpcClient); err != nil {
 		return err
 	}
 
-	// 第三步：启动 UDP 引擎
-	if err := a.startUDPEngine(grpcClient); err != nil {
-		return err
-	}
+	// 第五步：启动外网数据泵出协程
+	node.startDataPumpOutbound()
 
-	// 第四步：开启 Data Pump 出站协程
-	a.startDataPumpOutbound()
+	g, _ := errgroup.WithContext(context.Background())
 
-	// 第五步：开启心跳与重连守护协程
-	go a.keepaliveLoop(grpcClient)
+	g.Go(func() error {
+		return node.keepaliveLoop(grpcClient)
+	})
 
 	// 阻塞当前主线程，处理交互式终端输入
-	a.handleTerminalInput()
+	g.Go(func() error {
+		node.handleTerminalInput()
+		return nil
+	})
 
-	return nil
+	return g.Wait()
 }
 
-func (a *Node) startDataPumpOutbound() {
+func (node *Node) startDataPumpOutbound() {
 	go func() {
-		buf := make([]byte, 2000) // MTU 1420，2000足够容纳
-		for {
-			n, err := a.tunDevice.Read(buf)
-			if err != nil {
-				log.Printf("TUN Read error: %v", err)
-				return
-			}
+		// Headroom 预留了 13 个字节：5 字节协议头 + 8 字节加密 Nonce
+		const Headroom = 13
+		buf := make([]byte, 2000)
 
-			// 检查包长是否至少包含一个基础的 IPv4 头部 (20字节)
-			if n < 20 {
+		for {
+			// 直接从偏移 Headroom 的位置开始读取 TUN 数据
+			// 这样底层操作系统的网络栈会把真实的 IPv4 报文写在 buf[13:] 的位置
+			n, err := node.tunDevice.Read(buf[Headroom:])
+			if err != nil {
+				terminal.Error(fmt.Sprintf("Failed to read from TUN: %v", err))
+				time.Sleep(time.Second)
 				continue
 			}
 
-			// 检查是否为 IPv4 数据包 (IP 版本号位于第 1 个字节的高 4 位)
-			if buf[0]>>4 != 4 {
+			// IPv4 报文实际上在 buf[Headroom : Headroom+n]
+			packetData := buf[Headroom : Headroom+n]
+
+			// 检查是否为 IPv4 数据包 (IP 版本号位于第一个字节的高 4 位)
+			if packetData[0]>>4 != 4 {
 				continue
 			}
 
 			// 解析目的 IP (IPv4 头部的第 16 到 19 字节是目的 IP)
-			destVitrualIP := net.IPv4(buf[16], buf[17], buf[18], buf[19]).String()
+			destVitrualIP := net.IPv4(packetData[16], packetData[17], packetData[18], packetData[19]).String()
 
 			// 查找对方节点
-			peer := a.peerTable.GetPeer(destVitrualIP)
+			peer := node.peerTable.GetPeer(destVitrualIP)
 			if peer != nil {
-				if peer.State == StateConnected {
-					// 已连通，直接通过 UDP 发送原生 IP 数据包
-					a.udpEngine.SendRaw(buf[:n], peer.PublicAddr, destVitrualIP)
-				} else if peer.State != StatePunching {
-					// 发现发往该 IP 的流量，但尚未连通，触发打洞
-					log.Printf("🚦 Traffic detected for %s, but not connected. Triggering hole punch...", destVitrualIP)
-					a.udpEngine.Punch(destVitrualIP)
+				if peer.GetState() == StateConnected {
+					// 已连通，直接通过 UDP 发送零拷贝封装的 IP 数据包
+					node.udpEngine.SendDataPacket(buf[:Headroom+n], n, peer.GetObservedAddr(), destVitrualIP)
+				} else {
+					// 未连通（StateDisconnected 或 StatePunching），暂存数据包以防丢失首包
+					node.peerTable.EnqueuePacket(destVitrualIP, buf[:Headroom+n], n)
+					
+					if peer.GetState() != StatePunching {
+						// 发现发往该 IP 的流量，但尚未连通，触发打洞
+						terminal.Info(fmt.Sprintf("Traffic detected for %s, but not connected. Triggering hole punch...", destVitrualIP))
+						node.udpEngine.Punch(destVitrualIP)
+					}
 				}
 			}
 		}
 	}()
 }
 
-func (a *Node) registerNode(grpcClient pb.SignalingServiceClient, stopAnim func(bool)) error {
+func (node *Node) registerNode(grpcClient pb.SignalingServiceClient) error {
 	regReq := &pb.RegisterRequest{
-		RequestedHostname: a.hostname,
-		RequestedIp:       a.virtualIP,
+		RequestedHostname: node.hostname,
+		RequestedIp:       node.virtualIP,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	regResp, err := grpcClient.Register(ctx, regReq)
+	regRsp, err := grpcClient.Register(ctx, regReq)
 	if err != nil {
-		if status.Code(err) == codes.Unauthenticated {
-			stopAnim(true) // 清除动画
-			log.Fatalf("❌ FATAL: Authentication Failed (Invalid Token). Exiting.")
-		}
-		return fmt.Errorf("registration failed: %w", err)
+		return err
 	}
 
-	a.hostname = regResp.Hostname
-	a.virtualIP = regResp.VirtualIp
-	stopAnim(true) // 清除输出，避免和前面的动画在一行
-	log.Printf("✅ Registration successful!")
-	log.Printf("🌐 Assigned Hostname: %s", a.hostname)
-	log.Printf("🌐 Assigned Virtual IP: %s", a.virtualIP)
-	log.Printf("🌍 Server sees our Public IP as: %s", regResp.PublicIp)
+	node.hostname = regRsp.Hostname
+	node.virtualIP = regRsp.VirtualIp
+	node.serverStunPorts = regRsp.StunPorts
 	return nil
 }
 
-func (a *Node) initTunDevice() error {
-	tunDevice, err := tun.NewTunnel("gh0", a.virtualIP)
+func (node *Node) initTunDevice() error {
+	tunDevice, err := tun.NewTunnel("gh0", node.virtualIP)
 	if err != nil {
 		return fmt.Errorf("failed to initialize TUN device: %w", err)
 	}
-	a.tunDevice = tunDevice
-	log.Printf("🚀 TUN interface [%s] initialized with IP %s", tunDevice.Name(), a.virtualIP)
+	node.tunDevice = tunDevice
+	terminal.Success(fmt.Sprintf("TUN interface [%s] initialized with IP %s", tunDevice.Name(), node.virtualIP))
 
 	return nil
 }
 
-func (a *Node) startUDPEngine(grpcClient pb.SignalingServiceClient) error {
-	engine, err := NewUDPEngine(a.virtualIP, a.peerTable, grpcClient, func(data []byte) {
-		if a.tunDevice != nil {
-			n, err := a.tunDevice.Write(data)
-			if err != nil {
-				log.Printf("TUN Write error: %v", err)
-			} else {
-				// log.Printf("📦 [UDP -> TUN] Injected %d bytes to network stack", n)
-				_ = n
+func (node *Node) startUDPEngine(conn *net.UDPConn, grpcClient pb.SignalingServiceClient) error {
+	// 启动引擎，将干净的 conn 和探测到的公网端点传给它
+	engine, err := NewUDPEngine(
+		conn,
+		node.virtualIP,
+		node.peerTable,
+		grpcClient,
+		node.cfg.Server, // 直接使用 gRPC 的服务器地址作为主 STUN 和保活地址
+		node.publicIP,
+		node.publicPort,
+		node.cfg.KeepaliveInt,
+		func(data []byte) {
+			if node.tunDevice != nil {
+				_, err := node.tunDevice.Write(data)
+				if err != nil {
+					terminal.Error(fmt.Sprintf("TUN Write error: %v", err))
+				}
 			}
-		}
-	})
+		})
 	if err != nil {
+		conn.Close()
 		return fmt.Errorf("failed to start UDP engine: %w", err)
 	}
-	a.udpEngine = engine
-	a.udpEngine.Start()
+	node.udpEngine = engine
+	node.udpEngine.Start()
 	return nil
 }
 
-func (a *Node) runHeartbeatStream(grpcClient pb.SignalingServiceClient) error {
+// detectNAT 执行 STUN 探测，确定公网端点以及 NAT 类型
+func (node *Node) detectNAT(conn *net.UDPConn) error {
+	if len(node.serverStunPorts) == 0 {
+		return fmt.Errorf("server did not provide any STUN ports")
+	}
+
+	serverHost, _, err := net.SplitHostPort(node.cfg.Server)
+	if err != nil {
+		serverHost = node.cfg.Server // fallback
+	}
+
+	var stunServers []string
+	for _, port := range node.serverStunPorts {
+		stunServers = append(stunServers, fmt.Sprintf("%s:%d", serverHost, port))
+	}
+
+	terminal.Info(fmt.Sprintf("Discovering public endpoint via STUN servers: %v...", stunServers))
+
+	pubIP, pubPort, endpoints, err := stun.DetectNAT(conn, stunServers)
+	if err != nil {
+		return fmt.Errorf("all STUN discovery attempts failed: %w", err)
+	}
+
+	node.publicIP = pubIP
+	node.publicPort = pubPort
+
+	terminal.Success(fmt.Sprintf("STUN discovery successful! Public Endpoint: %s:%d", node.publicIP, node.publicPort))
+
+	if len(endpoints) > 1 {
+		node.natType = NatTypeHard
+		terminal.Warning("Different public endpoints detected across STUN servers:")
+		for ep, srv := range endpoints {
+			terminal.Warning(fmt.Sprintf("  - %s returned: %s", srv, ep))
+		}
+		terminal.Warning("This indicates you are behind a Symmetric NAT (NAT4).")
+		terminal.Warning("Standard UDP Hole Punching may FAIL in this network environment.")
+	} else {
+		node.natType = NatTypeEasy
+		terminal.Success("NAT Type detected as Easy (Cone NAT).")
+	}
+
+	return nil
+}
+
+func (node *Node) runHeartbeatStream(grpcClient pb.SignalingServiceClient) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -204,142 +304,111 @@ func (a *Node) runHeartbeatStream(grpcClient pb.SignalingServiceClient) error {
 		return fmt.Errorf("failed to start heartbeat stream: %w", err)
 	}
 
-	errCh := make(chan error, 1)
+	errGroup, ctx := errgroup.WithContext(ctx)
 
 	// 开启协程，定时发送心跳
-	go func() {
+	errGroup.Go(func() error {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
 		for {
 			err := stream.Send(&pb.HeartbeatRequest{
-				Hostname:   a.hostname,
-				VirtualIp:  a.virtualIP,
-				PublicPort: int32(a.udpEngine.GetPublicPort()),
-				PublicKey:  a.publicKey[:],
+				Hostname:   node.hostname,
+				VirtualIp:  node.virtualIP,
+				PublicPort: int32(node.udpEngine.GetPublicPort()),
+				PublicKey:  node.publicKey[:],
 			})
 			if err != nil {
-				errCh <- err
-				return
+				return err
 			}
 			select {
 			case <-ctx.Done():
-				return
-			case <-time.After(10 * time.Second):
-
+				return ctx.Err()
+			case <-ticker.C:
 			}
 		}
-	}()
+	})
 
 	// 开启协程，接收服务端的推送
-	go func() {
+	errGroup.Go(func() error {
 		for {
 			resp, err := stream.Recv()
 			if err != nil {
-				errCh <- err
-				return
+				return err
 			}
 
 			switch payload := resp.Payload.(type) {
 			case *pb.HeartbeatResponse_PeerList:
-				a.peerTable.SyncPeers(payload.PeerList.Peers)
-				a.printPeers(payload.PeerList.Peers)
+				node.peerTable.SyncPeers(payload.PeerList.Peers)
+				node.printPeers(payload.PeerList.Peers)
 			case *pb.HeartbeatResponse_Signal:
-				log.Printf("📥 Received signal from %s (Type: %v)", payload.Signal.FromVirtualIp, payload.Signal.Type)
-				a.udpEngine.HandleSignal(payload.Signal)
+				terminal.Info(fmt.Sprintf("Received signal from %s (Type: %v)", payload.Signal.FromVirtualIp, payload.Signal.Type))
+				node.udpEngine.HandleSignal(payload.Signal)
 			}
 		}
-	}()
+	})
 
-	return <-errCh
+	return errGroup.Wait()
 }
 
-func (a *Node) keepaliveLoop(grpcClient pb.SignalingServiceClient) {
+func (node *Node) keepaliveLoop(grpcClient pb.SignalingServiceClient) error {
 	for {
 		// 阻塞执行心跳流，直到流异常断开（比如网络断开、服务端重启）
-		err := a.runHeartbeatStream(grpcClient)
-		log.Printf("\n⚠️ Disconnected from server: %v. Existing P2P connections remain active.", err)
+		err := node.runHeartbeatStream(grpcClient)
+		terminal.Error(fmt.Sprintf("\nDisconnected from server: %v. Existing P2P connections remain active.", err))
 
 		// 进入断线重连循环
 		var lastErrMsg string
 		for {
-			stopAnim := startAnimation("🔄 Waiting to reconnect")
+			stopAnim := terminal.StartSpinner("Waiting to reconnect...")
 			time.Sleep(4000 * time.Millisecond)
 
-			// a.virtualIP 此时保存的是我们断线前的 IP
+			// node.virtualIP 此时保存的是我们断线前的 IP
 			// 这里会带着这个旧 IP 请求重新注册
-			err := a.registerNode(grpcClient, stopAnim)
+			err = node.registerNode(grpcClient)
+			stopAnim(true) // 清除动画
 			if err == nil {
-				log.Printf("✅ Re-registration successful. Resuming heartbeat.")
+				terminal.Success("Re-registration successful. Resuming heartbeat.")
+				node.printNodeInfo()
 				break // 注册成功，跳出重试，回到外层重新执行 runHeartbeatStream
 			}
 
-			if strings.Contains(err.Error(), "AlreadyExists") || strings.Contains(err.Error(), "IP conflict") {
-				stopAnim(true) // 清除动画
-				log.Fatalf("❌ Critical Error: The IP %s has been occupied by another node. Connection cannot be restored. Please restart the client to obtain a new IP!", a.virtualIP)
+			if status.Code(err) == codes.AlreadyExists {
+				terminal.Error(fmt.Sprintf("Critical Error: The IP %s has been occupied by another node. Connection cannot be restored. Please restart the client to obtain a new IP!", node.virtualIP))
+				return err
 			}
-			
+
 			errMsg := err.Error()
 			if errMsg != lastErrMsg {
-				stopAnim(true) // 有新错误时清除动画，干干净净打印错误
-				log.Printf("❌ Re-registration failed: %v. Retrying...", err)
+				terminal.Error(fmt.Sprintf("Re-registration failed: %v. Retrying...", err))
 				lastErrMsg = errMsg
-			} else {
-				stopAnim(false) // 同样的错误，保留行不清除
 			}
 		}
 	}
 }
 
+// initgRPCOpts 初始化与 Signaling Server 通信的 gRPC 选项
+func (node *Node) initgRPCOpts() []grpc.DialOption {
+	var tlsConfig *tls.Config
 
-func (a *Node) initgRPCopts() []grpc.DialOption {
-	// 构建特殊的 tls.Config
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true, // 跳过域名校验
-	}
-	if a.cfg.ServerPubKey != "" {
-		tlsConfig.VerifyPeerCertificate = crypto.VerifyPeerPublicKey(a.cfg.ServerPubKey) // 核心：精准指纹狙击
+	// 1. 安全性配置：基于公钥的 TLS Pinning (防 MITM 攻击)
+	if node.cfg.ServerPubKey == "" {
+		// 未配置服务端公钥时，直接跳过所有 TLS 校验（不安全）
+		tlsConfig = &tls.Config{InsecureSkipVerify: true}
+		terminal.Warning("WARNING: Server Public Key not provided. Connection is NOT secure against MITM attacks.")
 	} else {
-		log.Println("⚠️ WARNING: Server Public Key not provided. Connection is NOT secure against MITM attacks.")
+		// 配置了公钥时，跳过传统 CA 校验，使用手动提取和比对公钥的方式进行强验证
+		tlsConfig = &tls.Config{
+			InsecureSkipVerify:    true,
+			VerifyPeerCertificate: crypto.VerifyPeerPublicKey(node.cfg.ServerPubKey),
+		}
 	}
 
 	var opts []grpc.DialOption
 	opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
 
-	if a.cfg.Token != "" {
-		opts = append(opts, grpc.WithPerRPCCredentials(auth.NewTokenAuth(a.cfg.Token)))
+	// 2. 鉴权配置：将 Token 附加到每个 gRPC 请求的 Metadata 中
+	if node.cfg.Token != "" {
+		opts = append(opts, grpc.WithPerRPCCredentials(auth.NewTokenAuth(node.cfg.Token)))
 	}
 	return opts
-}
-
-func startAnimation(msg string) func(bool) {
-	done := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		frames := []string{"[=    ]", "[ =   ]", "[  =  ]", "[   = ]", "[    =]", "[   = ]", "[  =  ]", "[ =   ]"}
-		i := 0
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-		fmt.Printf("\r%s %s", msg, frames[0])
-		i++
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				fmt.Printf("\r%s %s", msg, frames[i%len(frames)])
-				i++
-			}
-		}
-	}()
-
-	var once sync.Once
-	return func(clearLine bool) {
-		once.Do(func() {
-			close(done)
-			wg.Wait()
-			if clearLine {
-				fmt.Printf("\r\033[K")
-			}
-		})
-	}
 }

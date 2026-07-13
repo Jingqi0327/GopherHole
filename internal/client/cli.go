@@ -6,11 +6,15 @@ import (
 	"log"
 	"os"
 	"strings"
+	"text/tabwriter"
 
+	"github.com/Jingqi0327/GopherHole/pkg/terminal"
 	"github.com/Jingqi0327/GopherHole/proto/pb"
 )
 
-func (a *Node) handleTerminalInput() {
+
+
+func (node *Node) handleTerminalInput() {
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
 		// fmt.Print("> ") // 省略 prompt 以免干扰日志
@@ -31,23 +35,38 @@ func (a *Node) handleTerminalInput() {
 				fmt.Println("Usage: punch <virtual_ip_or_hostname>")
 				continue
 			}
-			target := a.peerTable.ResolveVirtualIP(parts[1])
+			target := node.peerTable.ResolveVirtualIP(parts[1])
 			if target == "" {
 				target = parts[1] // fallback
 			}
-			a.udpEngine.Punch(target)
+			node.udpEngine.Punch(target)
 		case "msg":
 			if len(parts) < 3 {
 				fmt.Println("Usage: msg <virtual_ip_or_hostname> <text>")
 				continue
 			}
-			target := a.peerTable.ResolveVirtualIP(parts[1])
+			target := node.peerTable.ResolveVirtualIP(parts[1])
 			if target == "" {
 				target = parts[1]
 			}
-			a.udpEngine.SendMessage(target, parts[2])
+			node.udpEngine.SendMessage(target, parts[2])
 		case "list":
-			a.listPeers()
+			localPeers := node.peerTable.GetAllPeers()
+			var displayPeers []peerDisplayInfo
+			for _, p := range localPeers {
+				info := peerDisplayInfo{
+					Hostname:   p.Hostname,
+					VirtualIP:  p.VirtualIP,
+					PublicAddr: p.ObservedAddr.String(),
+				}
+				if p.VirtualIP == node.virtualIP {
+					info.StateMsg = fmt.Sprintf("%s<This Node>%s", terminal.ColorCyan, terminal.ColorReset)
+				} else {
+					info.StateMsg = formatState(p.State)
+				}
+				displayPeers = append(displayPeers, info)
+			}
+			printPeerTable(displayPeers)
 		default:
 			fmt.Println("Unknown command. Supported: punch, msg, list")
 		}
@@ -58,52 +77,76 @@ func (a *Node) handleTerminalInput() {
 	}
 }
 
-// printPeers 在终端格式化打印当前所有的在线节点
-func (a *Node) printPeers(peers []*pb.RemotePeer) {
-	fmt.Println("\n============================================ 🟢 ONLINE PEERS ============================================")
-	for _, p := range peers {
-		marker := ""
-		if p.VirtualIp == a.virtualIP {
-			marker = "👈 (This Node)"
-		} else {
-			state := "Disconnected"
-			if peer := a.peerTable.GetPeer(p.VirtualIp); peer != nil {
-				switch peer.State {
-				case StatePunching:
-					state = "Punching..."
-				case StateConnected:
-					state = "Connected!"
-				}
-			}
-			marker = fmt.Sprintf("[%s]", state)
-		}
-		publicAddr := fmt.Sprintf("%s:%d", p.PublicIp, p.PublicPort)
-		fmt.Printf(" - | %-15s | Virtual IP: %-15s | Public IP: %-20s %s\n", p.Hostname, p.VirtualIp, publicAddr, marker)
-	}
-	fmt.Println("=========================================================================================================")
+type peerDisplayInfo struct {
+	Hostname   string
+	VirtualIP  string
+	PublicAddr string
+	StateMsg   string
 }
 
-func (a *Node) listPeers() {
-	peers := a.peerTable.GetAllPeers()
+func printPeerTable(peers []peerDisplayInfo) {
+	fmt.Printf("\n%s============================================= ONLINE PEERS =============================================%s\n", terminal.ColorYellow, terminal.ColorReset)
 
-	fmt.Println("\n============================================ 🟢 ONLINE PEERS ============================================")
+	// 初始化 tabwriter：按制表符 '\t' 自动对齐列，padding 设为 3 个空格
+	// 注意：由于 ANSI 颜色代码的存在，tabwriter 计算宽度会把颜色代码的长度也算进去。
+	// 但只要同一列的每一行写入的颜色代码长度完全一致，相对对齐就不会遭到破坏！
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+
 	for _, p := range peers {
-		marker := ""
-		if p.VirtualIP == a.virtualIP {
-			marker = "👈 (This Node)"
-		} else {
-			state := "Disconnected"
-			if peer := a.peerTable.GetPeer(p.VirtualIP); peer != nil {
-				switch peer.State {
-				case StatePunching:
-					state = "Punching..."
-				case StateConnected:
-					state = "Connected!"
-				}
-			}
-			marker = fmt.Sprintf("[%s]", state)
-		}
-		fmt.Printf(" - | %-15s | Virtual IP: %-15s | Public IP: %-20s %s\n", p.Hostname, p.VirtualIP, p.PublicAddr.String(), marker)
+		fmt.Fprintf(w, "  %s%s%s\t| %sVirtual IP:%s %s\t| %sPublic IP:%s %s\t| %s\n",
+			terminal.ColorCyan, p.Hostname, terminal.ColorReset,
+			terminal.ColorCyan, terminal.ColorReset, p.VirtualIP,
+			terminal.ColorGreen, terminal.ColorReset, p.PublicAddr,
+			p.StateMsg,
+		)
 	}
-	fmt.Println("=========================================================================================================")
+	w.Flush() // 触发排版输出
+
+	fmt.Printf("%s=========================================================================================================%s\n", terminal.ColorYellow, terminal.ColorReset)
 }
+
+// 被 Server 心跳推送触发
+func (node *Node) printPeers(remotePeers []*pb.RemotePeer) {
+	var displayPeers []peerDisplayInfo
+
+	for _, p := range remotePeers {
+		info := peerDisplayInfo{
+			Hostname:   p.Hostname,
+			VirtualIP:  p.VirtualIp,
+			PublicAddr: fmt.Sprintf("%s:%d", p.PublicIp, p.PublicPort),
+		}
+
+		if p.VirtualIp == node.virtualIP {
+			info.StateMsg = fmt.Sprintf("%s<This Node>%s", terminal.ColorCyan, terminal.ColorReset)
+		} else {
+			info.StateMsg = fmt.Sprintf("%s[Disconnected]%s", terminal.ColorRed, terminal.ColorReset)
+			if localPeer := node.peerTable.GetPeer(p.VirtualIp); localPeer != nil {
+				info.StateMsg = formatState(localPeer.State)
+			}
+		}
+		displayPeers = append(displayPeers, info)
+	}
+
+	printPeerTable(displayPeers)
+}
+
+func formatState(state PeerState) string {
+	switch state {
+	case StatePunching:
+		return fmt.Sprintf("%s[Punching...]%s", terminal.ColorYellow, terminal.ColorReset)
+	case StateConnected:
+		return fmt.Sprintf("%s[Connected!]%s", terminal.ColorGreen, terminal.ColorReset)
+	default:
+		return fmt.Sprintf("%s[Disconnected]%s", terminal.ColorRed, terminal.ColorReset)
+	}
+}
+
+func (node *Node) printNodeInfo() {
+	fmt.Printf("\n%s--- GopherHole Node Info ---%s\n", terminal.ColorYellow, terminal.ColorReset)
+	fmt.Printf("  %sHostname%s   : %s\n", terminal.ColorCyan, terminal.ColorReset, node.hostname)
+	fmt.Printf("  %sVirtual IP%s : %s\n", terminal.ColorCyan, terminal.ColorReset, node.virtualIP)
+	fmt.Printf("%s----------------------------%s\n\n", terminal.ColorYellow, terminal.ColorReset)
+}
+
+
+

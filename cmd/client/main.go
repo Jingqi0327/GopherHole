@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/Jingqi0327/GopherHole/internal/client"
 	"github.com/Jingqi0327/GopherHole/internal/config"
+	"github.com/Jingqi0327/GopherHole/pkg/terminal"
 	"github.com/Jingqi0327/GopherHole/pkg/utils"
 )
 
@@ -23,22 +25,27 @@ func main() {
 
 	log.Println("GopherHole Client is starting...")
 
-	node := client.NewNode(cfg)
+	node, err := client.NewNode(cfg)
+	if err != nil {
+		fmt.Printf("\n%sFATAL: Failed to initialize node: %v. Exiting.%s\n", terminal.ColorRed, err, terminal.ColorReset)
+		os.Exit(1)
+	}
 
 	// Catch SIGINT and SIGTERM to clean up hosts file
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigs
-		log.Println("\n🛑 Shutting down GopherHole client...")
-		client.CleanHostsFile()
+		fmt.Printf("\n%sShutting down GopherHole client...%s\n", terminal.ColorYellow, terminal.ColorReset)
+		utils.CleanHostsFile()
 		os.Exit(0)
 	}()
 
 	// Also clean up if Run() returns normally
-	defer client.CleanHostsFile()
+	defer utils.CleanHostsFile()
 
 	if err := node.Run(); err != nil {
-		log.Fatalf("Client error: %v", err)
+		fmt.Printf("\n%sFATAL: %v. Exiting.%s\n", terminal.ColorRed, err, terminal.ColorReset)
+		os.Exit(1)
 	}
 }
