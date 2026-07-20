@@ -9,6 +9,9 @@ import (
 )
 
 // DetectNAT 对指定的多个 STUN 服务器进行探测，返回公网地址信息和各个探测点的映射结果
+// 注意：返回的 pubIP/pubPort 优先使用列表中最后一个成功的 STUN 结果，
+// 因为 keepalive 保活包的发送目标通常是列表最后一个（自建 Server），
+// 对于 NAT4 来说，使用 Server 观测到的端口可以避免首次保活时误报 "NAT Mapping changed"
 func DetectNAT(conn *net.UDPConn, stunServers []string) (string, int, map[string]string, error) {
 	var pubIP string
 	var pubPort int
@@ -17,10 +20,9 @@ func DetectNAT(conn *net.UDPConn, stunServers []string) (string, int, map[string
 	for _, server := range stunServers {
 		ip, port, err := DiscoverPublicEndpoint(conn, server)
 		if err == nil {
-			if pubIP == "" {
-				pubIP = ip
-				pubPort = port
-			}
+			// 每次成功都覆盖，最终保留的是列表中最后一个成功的结果
+			pubIP = ip
+			pubPort = port
 			endpoint := fmt.Sprintf("%s:%d", ip, port)
 			endpoints[endpoint] = server
 		}

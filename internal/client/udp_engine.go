@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Jingqi0327/GopherHole/pkg/packet"
@@ -12,8 +13,6 @@ import (
 	"github.com/Jingqi0327/GopherHole/pkg/terminal"
 	"github.com/Jingqi0327/GopherHole/proto/pb"
 )
-
-
 
 type UDPEngine struct {
 	conn              *net.UDPConn              // 本地绑定的 UDP Socket，供所有 P2P 流量共用
@@ -24,10 +23,13 @@ type UDPEngine struct {
 	serverAddr        string                    // 远端信令服务器地址，用于发送探测包进行 NAT 映射保活
 	grpcClient        pb.SignalingServiceClient // gRPC 客户端，用于通过服务器中转打洞信令
 	keepaliveInterval int                       // NAT保活心跳间隔(秒)
+	localNatType      string                    // 本端 NAT 类型: "EasyNAT" 或 "HardNAT"
 	onIPPacket        func(data []byte)         // 回调函数：将收到的、解密后的底层 IP 报文注入 TUN 虚拟网卡
+	punchCancelsMu    sync.Mutex
+	punchCancels      map[string]context.CancelFunc
 }
 
-func NewUDPEngine(conn *net.UDPConn, virtualIP string, pt *PeerTable, grpcClient pb.SignalingServiceClient, serverAddr string, publicIP string, publicPort int, keepaliveInterval int, onIP func([]byte)) (*UDPEngine, error) {
+func NewUDPEngine(conn *net.UDPConn, virtualIP string, pt *PeerTable, grpcClient pb.SignalingServiceClient, serverAddr string, publicIP string, publicPort int, keepaliveInterval int, natType string, onIP func([]byte)) (*UDPEngine, error) {
 	localAddr := conn.LocalAddr().(*net.UDPAddr)
 	terminal.Success(fmt.Sprintf("UDP Engine started on local port %d", localAddr.Port))
 
@@ -40,7 +42,9 @@ func NewUDPEngine(conn *net.UDPConn, virtualIP string, pt *PeerTable, grpcClient
 		virtualIP:         virtualIP,
 		grpcClient:        grpcClient,
 		keepaliveInterval: keepaliveInterval,
+		localNatType:      natType,
 		onIPPacket:        onIP,
+		punchCancels:      make(map[string]context.CancelFunc),
 	}, nil
 }
 
@@ -48,6 +52,7 @@ func NewUDPEngine(conn *net.UDPConn, virtualIP string, pt *PeerTable, grpcClient
 func (e *UDPEngine) GetPublicPort() int {
 	return e.publicPort
 }
+
 
 func (e *UDPEngine) Start() {
 	go e.readLoop()
@@ -82,8 +87,8 @@ func (e *UDPEngine) startKeepAlive() {
 		peers := e.peerTable.GetAllPeers()
 		for _, peer := range peers {
 			if peer.GetState() == StateConnected || peer.GetState() == StatePunching {
-				// 复用 PUNCH 信令作为 Keep-Alive
-				e.sendControlPacket(peer.GetObservedAddr(), peer.VirtualIP, fmt.Sprintf("PUNCH:%s", e.virtualIP))
+				// 复用 PUNCH 信令作为 Keep-Alive，选择正确的 socket 发送
+				e.sendControlPacketAuto(peer.VirtualIP, fmt.Sprintf("PUNCH:%s", e.virtualIP))
 			}
 		}
 	}
@@ -118,38 +123,43 @@ func (e *UDPEngine) readLoop() {
 			continue
 		}
 
-		packetType, srcIP, ciphertext, err := packet.Parse(buf[:n])
-		if err != nil {
-			continue
-		}
+		e.processIncomingPacket(buf[:n], addr, e.conn)
+	}
+}
 
-		peer := e.peerTable.GetPeer(srcIP)
-		if peer == nil || peer.GetCipher() == nil {
-			// 未知来源或未协商好密钥，丢弃
-			continue
-		}
+// processIncomingPacket 解析并处理收到的 UDP 数据包
+func (e *UDPEngine) processIncomingPacket(data []byte, addr *net.UDPAddr, rxConn *net.UDPConn) {
+	packetType, srcIP, ciphertext, err := packet.Parse(data)
+	if err != nil {
+		return
+	}
 
-		plaintext, err := peer.GetCipher().Decrypt(ciphertext)
-		if err != nil {
-			terminal.Warning(fmt.Sprintf("Failed to decrypt packet from %s: %v", srcIP, err))
-			continue
-		}
+	peer := e.peerTable.GetPeer(srcIP)
+	if peer == nil || peer.GetCipher() == nil {
+		// 未知来源或未协商好密钥，丢弃
+		return
+	}
 
-		switch packetType {
-		case packet.TypeData:
-			if e.onIPPacket != nil {
-				e.onIPPacket(plaintext)
-			}
-		case packet.TypeControl:
-			e.handleControlPacket(plaintext, addr)
-		default:
-			terminal.Warning(fmt.Sprintf("Unknown packet type received: %d", packetType))
+	plaintext, err := peer.GetCipher().Decrypt(ciphertext)
+	if err != nil {
+		terminal.Warning(fmt.Sprintf("Failed to decrypt packet from %s: %v", srcIP, err))
+		return
+	}
+
+	switch packetType {
+	case packet.TypeData:
+		if e.onIPPacket != nil {
+			e.onIPPacket(plaintext)
 		}
+	case packet.TypeControl:
+		e.handleControlPacket(plaintext, addr, rxConn)
+	default:
+		terminal.Warning(fmt.Sprintf("Unknown packet type received: %d", packetType))
 	}
 }
 
 // handleControlPacket 处理控制包
-func (e *UDPEngine) handleControlPacket(data []byte, addr *net.UDPAddr) {
+func (e *UDPEngine) handleControlPacket(data []byte, addr *net.UDPAddr, rxConn *net.UDPConn) {
 	msg := string(data)
 	parts := strings.SplitN(msg, ":", 3) //msg格式 PUNCH:virtualIP、PUNCH_ACK:virtualIP、MSG:virtualIP:text
 	if len(parts) < 2 {
@@ -169,22 +179,28 @@ func (e *UDPEngine) handleControlPacket(data []byte, addr *net.UDPAddr) {
 		if peer != nil {
 			if peer.GetState() != StateConnected {
 				e.peerTable.UpdateState(fromVirtualIP, StateConnected)
+				e.CancelPunch(fromVirtualIP)
 				terminal.Success(fmt.Sprintf("[Hole Punched] %s <-> %s", e.virtualIP, fromVirtualIP))
-				
+
 				// 取出并发送由于尚未连通而积压在队列中的数据包 (例如 TCP SYN 首包)
 				pending := e.peerTable.FlushPendingPackets(fromVirtualIP)
 				for _, pkt := range pending {
 					e.SendDataPacket(pkt.Buffer, pkt.PayloadLen, addr, fromVirtualIP)
 				}
 			}
-			// 回复 ACK
-			e.sendControlPacket(addr, fromVirtualIP, fmt.Sprintf("PUNCH_ACK:%s", e.virtualIP))
+			// 回复 ACK，优先使用接收到该包的连接（如辅助 socket），以确保能被对端（NAT3）的防火墙放行
+			conn := rxConn
+			if conn == nil {
+				conn = e.conn
+			}
+			e.sendControlPacket(conn, addr, fromVirtualIP, fmt.Sprintf("PUNCH_ACK:%s", e.virtualIP))
 		}
 	case "PUNCH_ACK":
 		// 收到对方的探测响应
 		peer := e.peerTable.GetPeer(fromVirtualIP)
 		if peer != nil && peer.GetState() != StateConnected {
 			e.peerTable.UpdateState(fromVirtualIP, StateConnected)
+			e.CancelPunch(fromVirtualIP)
 			terminal.Success(fmt.Sprintf("[Hole Punched] %s <-> %s", e.virtualIP, fromVirtualIP))
 
 			// 取出并发送由于尚未连通而积压在队列中的数据包 (例如 TCP SYN 首包)
@@ -200,8 +216,8 @@ func (e *UDPEngine) handleControlPacket(data []byte, addr *net.UDPAddr) {
 	}
 }
 
-// sendControlPacket 发送一个带有 PUNCH、PUNCH_ACK 或 MSG 命令的 UDP 报文
-func (e *UDPEngine) sendControlPacket(addr *net.UDPAddr, destVirtualIP string, msg string) error {
+// sendControlPacket 通过指定的 conn 和 addr 发送控制包
+func (e *UDPEngine) sendControlPacket(conn *net.UDPConn, addr *net.UDPAddr, destVirtualIP string, msg string) error {
 	peer := e.peerTable.GetPeer(destVirtualIP)
 	if peer == nil || peer.GetCipher() == nil {
 		return fmt.Errorf("peer not found or no cipher")
@@ -212,8 +228,24 @@ func (e *UDPEngine) sendControlPacket(addr *net.UDPAddr, destVirtualIP string, m
 		return fmt.Errorf("failed to build packet for %s", destVirtualIP)
 	}
 
-	_, err := e.conn.WriteToUDP(buf, addr)
+	_, err := conn.WriteToUDP(buf, addr)
 	return err
+}
+
+// sendControlPacketAuto 自动选择正确的 socket 发送控制包
+// 如果 peer 有 DirectConn（NAT4 打洞成功后的专用 socket），使用 DirectConn；否则使用主 socket
+func (e *UDPEngine) sendControlPacketAuto(destVirtualIP string, msg string) error {
+	peer := e.peerTable.GetPeer(destVirtualIP)
+	if peer == nil {
+		return fmt.Errorf("peer not found")
+	}
+
+	conn := e.conn
+	if dc := peer.GetDirectConn(); dc != nil {
+		conn = dc
+	}
+
+	return e.sendControlPacket(conn, peer.GetObservedAddr(), destVirtualIP, msg)
 }
 
 // SendDataPacket 暴露给 Data Pump，用于发送零拷贝封装的 IPv4 数据包
@@ -227,51 +259,15 @@ func (e *UDPEngine) SendDataPacket(buffer []byte, payloadLen int, addr *net.UDPA
 	packet.InjectHeader(buffer, packet.TypeData, e.virtualIP)
 	finalBuf := peer.GetCipher().EncryptInPlace(buffer, payloadLen)
 
-	_, _ = e.conn.WriteToUDP(finalBuf, addr)
+	// 选择正确的 socket：如果有 DirectConn 则使用它
+	conn := e.conn
+	if dc := peer.GetDirectConn(); dc != nil {
+		conn = dc
+	}
+
+	_, _ = conn.WriteToUDP(finalBuf, addr)
 }
 
-// Punch 向目标节点发起打洞
-func (e *UDPEngine) Punch(targetVirtualIP string) {
-	peer := e.peerTable.GetPeer(targetVirtualIP)
-	if peer == nil {
-		terminal.Error(fmt.Sprintf("Target %s not found in peer table", targetVirtualIP))
-		return
-	}
-
-	terminal.Info(fmt.Sprintf("Starting hole punch to %s...", targetVirtualIP))
-	e.peerTable.UpdateState(targetVirtualIP, StatePunching)
-
-	// 1. 启动一个高频重试协程，快速发送多次探测包（提升穿透成功率，对抗丢包和时序问题）
-	go func() {
-		for i := 0; i < 5; i++ {
-			p := e.peerTable.GetPeer(targetVirtualIP)
-			if p == nil || p.GetState() == StateConnected {
-				return // 如果已经连通，直接停止发送探测
-			}
-			e.sendControlPacket(p.GetObservedAddr(), targetVirtualIP, fmt.Sprintf("PUNCH:%s", e.virtualIP))
-			time.Sleep(300 * time.Millisecond)
-		}
-
-		// 打不通的话恢复未连接状态
-		p := e.peerTable.GetPeer(targetVirtualIP)
-		if p != nil && p.GetState() == StatePunching {
-			terminal.Warning(fmt.Sprintf("Hole punch to %s timed out.", targetVirtualIP))
-			e.peerTable.UpdateState(targetVirtualIP, StateDisconnected)
-			e.peerTable.FlushPendingPackets(targetVirtualIP)
-		}
-	}()
-
-	// 2. 通过信令服务器下发打洞请求
-	req := &pb.SignalMessage{
-		FromVirtualIp: e.virtualIP,
-		ToVirtualIp:   targetVirtualIP,
-		Type:          pb.SignalMessage_REQUEST_PUNCH,
-	}
-	_, err := e.grpcClient.SignalRoute(context.Background(), req)
-	if err != nil {
-		terminal.Error(fmt.Sprintf("Failed to route signal: %v", err))
-	}
-}
 
 // HandleSignal 处理从 gRPC 收到的信令
 func (e *UDPEngine) HandleSignal(sig *pb.SignalMessage) {
@@ -293,7 +289,7 @@ func (e *UDPEngine) SendMessage(targetVirtualIP, text string) {
 		terminal.Error(fmt.Sprintf("Cannot send message: peer %s not found", targetVirtualIP))
 		return
 	}
-    // 如果没有连通，顺手帮他触发打洞
+	// 如果没有连通，顺手帮他触发打洞
 	if peer.GetState() != StateConnected {
 		terminal.Info(fmt.Sprintf("Not connected to %s. Triggering hole punch, please try sending again in a moment...", targetVirtualIP))
 		if peer.GetState() != StatePunching {
@@ -301,6 +297,5 @@ func (e *UDPEngine) SendMessage(targetVirtualIP, text string) {
 		}
 		return
 	}
-	e.sendControlPacket(peer.GetObservedAddr(), targetVirtualIP, fmt.Sprintf("MSG:%s:%s", e.virtualIP, text))
+	e.sendControlPacketAuto(targetVirtualIP, fmt.Sprintf("MSG:%s:%s", e.virtualIP, text))
 }
-

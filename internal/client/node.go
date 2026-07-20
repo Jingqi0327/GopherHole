@@ -233,6 +233,7 @@ func (node *Node) startUDPEngine(conn *net.UDPConn, grpcClient pb.SignalingServi
 		node.publicIP,
 		node.publicPort,
 		node.cfg.KeepaliveInt,
+		string(node.natType),
 		func(data []byte) {
 			if node.tunDevice != nil {
 				_, err := node.tunDevice.Write(data)
@@ -317,6 +318,7 @@ func (node *Node) runHeartbeatStream(grpcClient pb.SignalingServiceClient) error
 				VirtualIp:  node.virtualIP,
 				PublicPort: int32(node.udpEngine.GetPublicPort()),
 				PublicKey:  node.publicKey[:],
+				NatType:    string(node.natType),
 			})
 			if err != nil {
 				return err
@@ -339,7 +341,10 @@ func (node *Node) runHeartbeatStream(grpcClient pb.SignalingServiceClient) error
 
 			switch payload := resp.Payload.(type) {
 			case *pb.HeartbeatResponse_PeerList:
-				node.peerTable.SyncPeers(payload.PeerList.Peers)
+				deleted := node.peerTable.SyncPeers(payload.PeerList.Peers)
+				for _, virtualIP := range deleted {
+					node.udpEngine.CancelPunch(virtualIP)
+				}
 				node.printPeers(payload.PeerList.Peers)
 			case *pb.HeartbeatResponse_Signal:
 				terminal.Info(fmt.Sprintf("Received signal from %s (Type: %v)", payload.Signal.FromVirtualIp, payload.Signal.Type))

@@ -36,6 +36,8 @@ message HeartbeatRequest {
   int32 public_port = 3;
   // Client端的公钥,用于p2p隧道的加密
   bytes public_key = 4;
+  // NAT 类型: "EasyNAT" 或 "HardNAT"
+  string nat_type = 5;
 }
 
 // 定义一个在线节点的信息
@@ -45,6 +47,8 @@ message RemotePeer {
   string public_ip = 3;
   int32 public_port = 4;
   bytes public_key = 5;
+  // NAT 类型: "EasyNAT" 或 "HardNAT"
+  string nat_type = 6;
 }
 
 message PeerList {

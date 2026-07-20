@@ -14,6 +14,7 @@ type Peer struct {
 	PublicIP      string
 	PublicPort    int32
 	PublicKey     []byte
+	NatType       string
 	LastHeartbeat time.Time
 }
 
@@ -36,7 +37,7 @@ func NewPeerManager(onRemove func(virtualIP string)) *PeerManager {
 }
 
 // AddOrUpdatePeer 添加或更新节点信息
-func (m *PeerManager) AddOrUpdatePeer(hostname, virtualIP, publicIP string, publicPort int32, publicKey []byte) {
+func (m *PeerManager) AddOrUpdatePeer(hostname, virtualIP, publicIP string, publicPort int32, publicKey []byte, natType string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -48,18 +49,20 @@ func (m *PeerManager) AddOrUpdatePeer(hostname, virtualIP, publicIP string, publ
 			PublicIP:      publicIP,
 			PublicPort:    publicPort,
 			PublicKey:     publicKey,
+			NatType:       natType,
 			LastHeartbeat: time.Now(),
 		}
 		m.Events.Notify()
 		return
 	}
 
-	changed := p.PublicIP != publicIP || p.PublicPort != publicPort || !bytes.Equal(p.PublicKey, publicKey)
+	changed := p.PublicIP != publicIP || p.PublicPort != publicPort || !bytes.Equal(p.PublicKey, publicKey) || p.NatType != natType
 
 	p.Hostname = hostname
 	p.PublicIP = publicIP
 	p.PublicPort = publicPort
 	p.PublicKey = publicKey
+	p.NatType = natType
 	p.LastHeartbeat = time.Now()
 
 	if changed {
@@ -107,6 +110,7 @@ func (m *PeerManager) GetAllPeers() []*pb.RemotePeer {
 			PublicIp:   p.PublicIP,
 			PublicPort: p.PublicPort,
 			PublicKey:  p.PublicKey,
+			NatType:    p.NatType,
 		})
 	}
 	return result

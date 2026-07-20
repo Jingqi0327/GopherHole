@@ -77,7 +77,7 @@ func (s *SignalingService) Heartbeat(stream pb.SignalingService_HeartbeatServer)
 
 	publicIP := extractClientIP(stream.Context())
 
-	s.manager.AddOrUpdatePeer(req.GetHostname(), req.GetVirtualIp(), publicIP, req.GetPublicPort(), req.GetPublicKey())
+	s.manager.AddOrUpdatePeer(req.GetHostname(), req.GetVirtualIp(), publicIP, req.GetPublicPort(), req.GetPublicKey(), req.GetNatType())
 	log.Printf("Node %s(%s) started heartbeat (Public Port: %d)", req.GetHostname(), req.GetVirtualIp(), req.GetPublicPort())
 
 	// 注册信令通道
@@ -112,7 +112,7 @@ func (s *SignalingService) Heartbeat(stream pb.SignalingService_HeartbeatServer)
 				errCh <- err
 				return
 			}
-			s.manager.AddOrUpdatePeer(req.GetHostname(), req.GetVirtualIp(), publicIP, req.GetPublicPort(), req.GetPublicKey())
+			s.manager.AddOrUpdatePeer(req.GetHostname(), req.GetVirtualIp(), publicIP, req.GetPublicPort(), req.GetPublicKey(), req.GetNatType())
 		}
 	}()
 

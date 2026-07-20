@@ -183,7 +183,9 @@ type HeartbeatRequest struct {
 	// 客户端当前的 UDP 监听端口（预留给打洞阶段）
 	PublicPort int32 `protobuf:"varint,3,opt,name=public_port,json=publicPort,proto3" json:"public_port,omitempty"`
 	// Client端的公钥,用于p2p隧道的加密
-	PublicKey     []byte `protobuf:"bytes,4,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	PublicKey []byte `protobuf:"bytes,4,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	// NAT 类型: "EasyNAT" 或 "HardNAT"
+	NatType       string `protobuf:"bytes,5,opt,name=nat_type,json=natType,proto3" json:"nat_type,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -246,14 +248,23 @@ func (x *HeartbeatRequest) GetPublicKey() []byte {
 	return nil
 }
 
+func (x *HeartbeatRequest) GetNatType() string {
+	if x != nil {
+		return x.NatType
+	}
+	return ""
+}
+
 // 定义一个在线节点的信息
 type RemotePeer struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Hostname      string                 `protobuf:"bytes,1,opt,name=hostname,proto3" json:"hostname,omitempty"`
-	VirtualIp     string                 `protobuf:"bytes,2,opt,name=virtual_ip,json=virtualIp,proto3" json:"virtual_ip,omitempty"`
-	PublicIp      string                 `protobuf:"bytes,3,opt,name=public_ip,json=publicIp,proto3" json:"public_ip,omitempty"`
-	PublicPort    int32                  `protobuf:"varint,4,opt,name=public_port,json=publicPort,proto3" json:"public_port,omitempty"`
-	PublicKey     []byte                 `protobuf:"bytes,5,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Hostname   string                 `protobuf:"bytes,1,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	VirtualIp  string                 `protobuf:"bytes,2,opt,name=virtual_ip,json=virtualIp,proto3" json:"virtual_ip,omitempty"`
+	PublicIp   string                 `protobuf:"bytes,3,opt,name=public_ip,json=publicIp,proto3" json:"public_ip,omitempty"`
+	PublicPort int32                  `protobuf:"varint,4,opt,name=public_port,json=publicPort,proto3" json:"public_port,omitempty"`
+	PublicKey  []byte                 `protobuf:"bytes,5,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	// NAT 类型: "EasyNAT" 或 "HardNAT"
+	NatType       string `protobuf:"bytes,6,opt,name=nat_type,json=natType,proto3" json:"nat_type,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -321,6 +332,13 @@ func (x *RemotePeer) GetPublicKey() []byte {
 		return x.PublicKey
 	}
 	return nil
+}
+
+func (x *RemotePeer) GetNatType() string {
+	if x != nil {
+		return x.NatType
+	}
+	return ""
 }
 
 type PeerList struct {
@@ -583,7 +601,7 @@ const file_signaling_proto_rawDesc = "" +
 	"\x10RegisterResponse\x12\x1a\n" +
 	"\bhostname\x18\x01 \x01(\tR\bhostname\x12\x1d\n" +
 	"\n" +
-	"virtual_ip\x18\x02 \x01(\tR\tvirtualIp\"\x8d\x01\n" +
+	"virtual_ip\x18\x02 \x01(\tR\tvirtualIp\"\xa8\x01\n" +
 	"\x10HeartbeatRequest\x12\x1a\n" +
 	"\bhostname\x18\x01 \x01(\tR\bhostname\x12\x1d\n" +
 	"\n" +
@@ -591,7 +609,8 @@ const file_signaling_proto_rawDesc = "" +
 	"\vpublic_port\x18\x03 \x01(\x05R\n" +
 	"publicPort\x12\x1d\n" +
 	"\n" +
-	"public_key\x18\x04 \x01(\fR\tpublicKey\"\xa4\x01\n" +
+	"public_key\x18\x04 \x01(\fR\tpublicKey\x12\x19\n" +
+	"\bnat_type\x18\x05 \x01(\tR\anatType\"\xbf\x01\n" +
 	"\n" +
 	"RemotePeer\x12\x1a\n" +
 	"\bhostname\x18\x01 \x01(\tR\bhostname\x12\x1d\n" +
@@ -601,7 +620,8 @@ const file_signaling_proto_rawDesc = "" +
 	"\vpublic_port\x18\x04 \x01(\x05R\n" +
 	"publicPort\x12\x1d\n" +
 	"\n" +
-	"public_key\x18\x05 \x01(\fR\tpublicKey\"7\n" +
+	"public_key\x18\x05 \x01(\fR\tpublicKey\x12\x19\n" +
+	"\bnat_type\x18\x06 \x01(\tR\anatType\"7\n" +
 	"\bPeerList\x12+\n" +
 	"\x05peers\x18\x01 \x03(\v2\x15.signaling.RemotePeerR\x05peers\"\x86\x01\n" +
 	"\x11HeartbeatResponse\x122\n" +
